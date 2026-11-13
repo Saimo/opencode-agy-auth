@@ -1,8 +1,8 @@
 # opencode-agy-auth
 
-Minimal, zero-bloat **OpenCode v2** provider plugin for **Antigravity CLI (`google-agy`)** OAuth.
+Minimal, zero-bloat **OpenCode v2** provider & grounded web search plugin for **Antigravity CLI (`google-agy`)** OAuth.
 
-Strictly registers the `google-agy` provider, its OAuth integration, and Code Assist protocol hooks — no extra tools, no slash commands, no telemetry, no toast spam, no external runtime dependencies.
+Registers the `google-agy` LLM provider, OAuth integration, Code Assist protocol hooks, and OpenCode v2's native `websearch` provider — zero slash commands, zero telemetry, zero toast spam, zero external runtime dependencies.
 
 ## Installation (OpenCode v2)
 
@@ -49,6 +49,26 @@ Connect the **Antigravity CLI** integration in OpenCode v2 (`opencode auth login
 | `google-agy/gpt-oss-120b-medium` | GPT-OSS 120B (Medium) | — |
 
 In addition to the built-in catalog, the plugin automatically queries `:fetchAvailableModels` in the background when authenticated so newly released `agy` models and tier variants appear automatically.
+
+## Web Search (Enabled by Default, Opt-Out)
+
+By default, `opencode-agy-auth` registers **`Antigravity CLI` (`google-agy`)** as OpenCode v2's native `websearch` provider using Code Assist's Google Search grounding (`requestType: "web_search"` on `gemini-3.5-flash-lite`) with inline `[1]`, `[2]` citations and source URLs.
+
+To opt out of Antigravity web search (or set `OPENCODE_AGY_WEBSEARCH=false`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "github:Saimo/opencode-agy-auth",
+      "options": {
+        "webSearch": false
+      }
+    }
+  ]
+}
+```
 
 ## Optional Project ID
 

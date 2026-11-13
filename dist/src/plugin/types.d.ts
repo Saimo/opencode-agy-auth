@@ -274,8 +274,47 @@ export interface OpenCodeV2PluginLocation {
     readonly root?: string;
     readonly workspace?: string;
 }
+export interface OpenCodeV2WebSearchProviderInput {
+    readonly query: string;
+}
+export interface OpenCodeV2WebSearchResult {
+    readonly url: string;
+    readonly title?: string;
+    readonly content?: string;
+    readonly time: {
+        readonly published?: number;
+    };
+}
+export interface OpenCodeV2WebSearchDefinition {
+    readonly id: string;
+    readonly name: string;
+    readonly execute: (input: OpenCodeV2WebSearchProviderInput, context: {
+        readonly signal: AbortSignal;
+    }) => Promise<readonly OpenCodeV2WebSearchResult[]>;
+}
+export interface OpenCodeV2WebSearchEditor {
+    add(definition: OpenCodeV2WebSearchDefinition): void;
+    readonly default: {
+        get(): string | false | undefined;
+        set(selection: string | false): void;
+    };
+}
+export interface OpenCodeV2WebSearchDomain extends OpenCodeV2TransformRegistry<OpenCodeV2WebSearchEditor> {
+    readonly providers?: () => Promise<unknown>;
+    readonly query?: (input: {
+        query: string;
+        providerID?: string;
+    }) => Promise<unknown>;
+}
+export interface OpenCodeV2WebSearchOptions {
+    readonly enabled?: boolean;
+    readonly default?: boolean;
+    readonly model?: string;
+}
 export interface OpenCodeV2PluginOptions {
     readonly projectId?: string;
+    /** Enabled by default. Set to `false` (or `{ enabled: false }`) to opt out of Antigravity web search. */
+    readonly webSearch?: boolean | OpenCodeV2WebSearchOptions;
     readonly [key: string]: unknown;
 }
 export interface OpenCodeV2PluginContext {
@@ -283,6 +322,7 @@ export interface OpenCodeV2PluginContext {
     readonly model?: OpenCodeV2TransformRegistry<OpenCodeV2ModelEditor>;
     readonly integration: OpenCodeV2IntegrationDomain;
     readonly session: OpenCodeV2SessionDomain;
+    readonly websearch?: OpenCodeV2WebSearchDomain;
     readonly options?: OpenCodeV2PluginOptions;
     readonly location?: OpenCodeV2PluginLocation;
 }

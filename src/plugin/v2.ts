@@ -33,15 +33,19 @@ import {
   setStoredAuthOverrideForTesting,
 } from "./v2-storage";
 import { registerV2SessionHooks, resolveActiveOAuthCredential } from "./v2-session";
+import { registerV2WebSearch, resolveWebSearchConfig } from "./v2-websearch";
 import { initDiskSignatureCache, getDiskSignatureCache, resetDiskSignatureCacheForTesting } from "./cache";
 import { initTurnStateTracker, shutdownTurnStateTracker } from "../sdk/request";
 import { registerDynamicModelEnum, resetDynamicModelEnumsForTesting } from "../sdk/request/prepare";
 import { buildAgyCliUserAgent } from "../sdk/user-agent";
 import { initCooldownPersistence, shutdownRetryCooldowns } from "../sdk/retry";
+import { executeAgyWebSearch, parseAgyWebSearchPayload } from "../sdk/websearch";
 
 export { getSafeHeader, setSafeHeaders, toUrlString } from "./headers";
 export { STATIC_MODELS_SIMPLE, TIER_MAPPING, resolveModelTier, type SimpleStaticModel } from "./tier";
 export { getDiskSignatureCache, resetDiskSignatureCacheForTesting } from "./cache";
+export { registerV2WebSearch, resolveWebSearchConfig } from "./v2-websearch";
+export { executeAgyWebSearch, parseAgyWebSearchPayload } from "../sdk/websearch";
 export {
   loadStoredAuthFromJson,
   saveStoredAuthToJson,
@@ -451,6 +455,9 @@ export async function setupOpenCodeV2(ctx: OpenCodeV2PluginContext): Promise<Ope
   // 3. Register session HTTP request/response rewriting and quota-aware retry hooks
   await registerV2SessionHooks(ctx, { getConfiguredProjectId });
 
+  // 4. Register Antigravity grounded web search provider (enabled by default; opt-out via options.webSearch: false)
+  const disposeWebSearch = await registerV2WebSearch(ctx, { getConfiguredProjectId });
+
   let disposed = false;
 
   async function syncAvailableModels(authOverride?: OAuthAuthDetails): Promise<void> {
@@ -497,8 +504,9 @@ export async function setupOpenCodeV2(ctx: OpenCodeV2PluginContext): Promise<Ope
 
   void syncAvailableModels();
 
-  return () => {
+  return async () => {
     disposed = true;
+    await disposeWebSearch?.();
     getDiskSignatureCache()?.shutdown();
     shutdownTurnStateTracker();
     shutdownRetryCooldowns();

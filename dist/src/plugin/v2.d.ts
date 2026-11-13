@@ -2,6 +2,8 @@ import { type OpenCodeV2Cleanup, type OpenCodeV2ModelVariant, type OpenCodeV2Plu
 export { getSafeHeader, setSafeHeaders, toUrlString } from "./headers";
 export { STATIC_MODELS_SIMPLE, TIER_MAPPING, resolveModelTier, type SimpleStaticModel } from "./tier";
 export { getDiskSignatureCache, resetDiskSignatureCacheForTesting } from "./cache";
+export { registerV2WebSearch, resolveWebSearchConfig } from "./v2-websearch";
+export { executeAgyWebSearch, parseAgyWebSearchPayload } from "../sdk/websearch";
 export { loadStoredAuthFromJson, saveStoredAuthToJson, setStoredAuthOverrideForTesting, } from "./v2-storage";
 export declare function resetDynamicModelsForTesting(): void;
 export declare function resolveModelVariants(modelId: string): OpenCodeV2ModelVariant[];

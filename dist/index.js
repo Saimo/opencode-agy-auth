@@ -1400,7 +1400,14 @@ async function ensureProjectContext(auth, client, configuredProjectId, userAgent
   if (cacheKey) {
     const cached = projectContextResultCache.get(cacheKey);
     if (cached) {
-      return cached;
+      return {
+        ...cached,
+        auth: {
+          ...cached.auth,
+          access: auth.access,
+          expires: auth.expires
+        }
+      };
     }
     const pending = projectContextPendingCache.get(cacheKey);
     if (pending) {
@@ -8002,10 +8009,374 @@ async function registerV2SessionHooks(ctx, options = {}) {
   });
 }
 
+// src/sdk/websearch.ts
+import { randomUUID as randomUUID4 } from "crypto";
+var DEFAULT_WEB_SEARCH_MODELS = (() => {
+  const fromCatalog = Array.isArray(models_default.webSearchModelIds) ? models_default.webSearchModelIds.filter(
+    (id) => typeof id === "string" && id.trim().length > 0
+  ) : [];
+  const fallbacks = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"];
+  return Array.from(/* @__PURE__ */ new Set([...fromCatalog, ...fallbacks]));
+})();
+var RETRYABLE_WEB_SEARCH_STATUSES = /* @__PURE__ */ new Set([429, 500, 502, 503, 504]);
+function clampUtf8Boundary(buf, byteOffset) {
+  let idx = Math.max(0, Math.min(buf.length, Math.trunc(byteOffset)));
+  while (idx > 0 && idx < buf.length && (buf[idx] & 192) === 128) {
+    idx--;
+  }
+  return idx;
+}
+function extractDomainTitle(uri) {
+  try {
+    return new URL(uri).hostname.replace(/^www\./i, "") || uri;
+  } catch {
+    return uri;
+  }
+}
+function injectInlineCitations(summaryText, supports, chunkToCitation) {
+  if (!summaryText || supports.length === 0 || chunkToCitation.size === 0) {
+    return summaryText;
+  }
+  const utf8 = Buffer.from(summaryText, "utf8");
+  const insertionsByOffset = /* @__PURE__ */ new Map();
+  for (const support of supports) {
+    const rawEnd = support?.segment?.endIndex;
+    if (typeof rawEnd !== "number" || !Number.isFinite(rawEnd) || rawEnd <= 0) {
+      continue;
+    }
+    const indices = support.groundingChunkIndices;
+    if (!Array.isArray(indices) || indices.length === 0) {
+      continue;
+    }
+    const citationNumbers = [];
+    for (const chunkIdx of indices) {
+      const citation = chunkToCitation.get(chunkIdx);
+      if (citation !== void 0) {
+        citationNumbers.push(citation);
+      }
+    }
+    if (citationNumbers.length === 0) {
+      continue;
+    }
+    const clampedOffset = clampUtf8Boundary(utf8, rawEnd);
+    const bucket = insertionsByOffset.get(clampedOffset) ?? /* @__PURE__ */ new Set();
+    for (const c of citationNumbers) {
+      bucket.add(c);
+    }
+    insertionsByOffset.set(clampedOffset, bucket);
+  }
+  if (insertionsByOffset.size === 0) {
+    return summaryText;
+  }
+  const sortedOffsets = Array.from(insertionsByOffset.keys()).sort((a, b) => a - b);
+  const chunks = [];
+  let cursor = 0;
+  for (const offset of sortedOffsets) {
+    if (offset > cursor) {
+      chunks.push(utf8.subarray(cursor, offset));
+      cursor = offset;
+    }
+    const markerNums = Array.from(insertionsByOffset.get(offset)).sort((a, b) => a - b);
+    const marker = markerNums.map((n) => `[${n}]`).join("");
+    chunks.push(Buffer.from(marker, "utf8"));
+  }
+  if (cursor < utf8.length) {
+    chunks.push(utf8.subarray(cursor));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+function parseAgyWebSearchPayload(payload, query) {
+  const root = payload && typeof payload === "object" && "response" in payload ? payload.response : payload;
+  if (!root || typeof root !== "object") {
+    return [];
+  }
+  const candidates = root.candidates;
+  const candidate = Array.isArray(candidates) ? candidates[0] : void 0;
+  if (!candidate) {
+    return [];
+  }
+  const rawParts = Array.isArray(candidate.content?.parts) ? candidate.content.parts : [];
+  const summaryText = rawParts.filter((part) => part && part.thought !== true && typeof part.text === "string").map((part) => part.text).join("").trim();
+  const rawChunks = Array.isArray(candidate.groundingMetadata?.groundingChunks) ? candidate.groundingMetadata.groundingChunks : [];
+  const rawSupports = Array.isArray(candidate.groundingMetadata?.groundingSupports) ? candidate.groundingMetadata.groundingSupports : [];
+  const sourcesByUri = /* @__PURE__ */ new Map();
+  const chunkToCitation = /* @__PURE__ */ new Map();
+  for (let i = 0; i < rawChunks.length; i++) {
+    const web = rawChunks[i]?.web;
+    const uri = typeof web?.uri === "string" ? web.uri.trim() : "";
+    if (!uri) continue;
+    let existing = sourcesByUri.get(uri);
+    if (!existing) {
+      const title = (typeof web?.title === "string" ? web.title.trim() : "") || extractDomainTitle(uri);
+      existing = {
+        citationIndex: sourcesByUri.size + 1,
+        uri,
+        title,
+        snippets: []
+      };
+      sourcesByUri.set(uri, existing);
+    }
+    chunkToCitation.set(i, existing.citationIndex);
+  }
+  const sourcesByCitation = /* @__PURE__ */ new Map();
+  for (const source of sourcesByUri.values()) {
+    sourcesByCitation.set(source.citationIndex, source);
+  }
+  for (const support of rawSupports) {
+    const snippet = typeof support?.segment?.text === "string" ? support.segment.text.trim() : "";
+    if (!snippet || !Array.isArray(support.groundingChunkIndices)) continue;
+    for (const chunkIdx of support.groundingChunkIndices) {
+      const citation = chunkToCitation.get(chunkIdx);
+      const source = citation !== void 0 ? sourcesByCitation.get(citation) : void 0;
+      if (source && !source.snippets.includes(snippet)) {
+        source.snippets.push(snippet);
+      }
+    }
+  }
+  const orderedSources = Array.from(sourcesByUri.values());
+  if (!summaryText && orderedSources.length === 0) {
+    return [];
+  }
+  const citedSummary = injectInlineCitations(summaryText, rawSupports, chunkToCitation);
+  const results = [];
+  if (citedSummary) {
+    const primaryUrl = orderedSources[0]?.uri ?? `https://www.google.com/search?q=${encodeURIComponent(query.trim())}`;
+    let fullContent = citedSummary;
+    if (orderedSources.length > 0) {
+      const sourceLines = orderedSources.map((s) => `[${s.citationIndex}] [${s.title}](${s.uri})`);
+      const hasRedirectUrls = orderedSources.some(
+        (s) => s.uri.includes("vertexaisearch.cloud.google.com/grounding-api-redirect")
+      );
+      fullContent += `
+
+Sources:
+${sourceLines.join("\n")}`;
+      if (hasRedirectUrls) {
+        fullContent += "\n\nNote: Source URLs are HTTP redirects; follow the redirect if you need the canonical destination URL.";
+      }
+    }
+    results.push({
+      url: primaryUrl,
+      title: `Antigravity Web Search: ${query.trim()}`,
+      content: fullContent,
+      time: {}
+    });
+  }
+  for (const source of orderedSources) {
+    results.push({
+      url: source.uri,
+      title: `[${source.citationIndex}] ${source.title}`,
+      ...source.snippets.length > 0 ? { content: source.snippets.join(" \u2026 ") } : {},
+      time: {}
+    });
+  }
+  return results;
+}
+function buildAgyWebSearchRequestBody(input) {
+  const trimmedQuery = input.query.trim();
+  const trimmedDomain = input.domain?.trim();
+  const promptText = trimmedDomain ? `${trimmedQuery}
+
+Prioritize authoritative results from domain: ${trimmedDomain}` : trimmedQuery;
+  return {
+    project: input.projectId,
+    model: input.model,
+    requestId: randomUUID4(),
+    userAgent: "antigravity",
+    requestType: "web_search",
+    request: {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: promptText }]
+        }
+      ],
+      tools: [{ googleSearch: {} }],
+      labels: {
+        last_execution_id: randomUUID4(),
+        last_step_index: "0",
+        model_enum: getModelEnum(input.model),
+        trajectory_id: randomUUID4(),
+        used_claude: "false",
+        used_claude_conservative: "false"
+      }
+    }
+  };
+}
+async function executeAgyWebSearch(options) {
+  const trimmedQuery = options.query.trim();
+  if (!trimmedQuery) {
+    return [];
+  }
+  const candidateModels = options.model?.trim() ? [options.model.trim()] : DEFAULT_WEB_SEARCH_MODELS;
+  const url = `${AGY_CODE_ASSIST_ENDPOINT}/v1internal:generateContent`;
+  let lastStatus = 0;
+  let lastErrorText = "";
+  for (let i = 0; i < candidateModels.length; i++) {
+    const model = candidateModels[i];
+    const body = buildAgyWebSearchRequestBody({
+      query: trimmedQuery,
+      domain: options.domain,
+      projectId: options.projectId,
+      model
+    });
+    const response = await agyFetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${options.accessToken}`,
+        "User-Agent": buildAgyCliUserAgent(model),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body),
+      signal: options.signal
+    });
+    if (response.ok) {
+      const payload = await response.json();
+      return parseAgyWebSearchPayload(payload, trimmedQuery);
+    }
+    lastStatus = response.status;
+    try {
+      lastErrorText = (await response.text()).slice(0, 500);
+    } catch {
+      lastErrorText = "";
+    }
+    const hasNextFallback = i < candidateModels.length - 1;
+    if (!hasNextFallback || !RETRYABLE_WEB_SEARCH_STATUSES.has(response.status)) {
+      break;
+    }
+  }
+  const error = new Error(
+    `Antigravity web search failed (HTTP ${lastStatus})${lastErrorText ? `: ${lastErrorText}` : ""}`
+  );
+  error.response = { status: lastStatus };
+  throw error;
+}
+
+// src/plugin/v2-websearch.ts
+var persistAuthClient2 = {
+  auth: {
+    async set({ body }) {
+      try {
+        saveStoredAuthToJson(body);
+      } catch {
+      }
+    }
+  }
+};
+function resolveWebSearchConfig(options) {
+  const envFlag = process.env.OPENCODE_AGY_WEBSEARCH?.trim().toLowerCase();
+  if (envFlag === "false" || envFlag === "0" || envFlag === "off" || envFlag === "no") {
+    return { enabled: false, setDefault: false };
+  }
+  const raw = options?.webSearch;
+  if (raw === false) {
+    return { enabled: false, setDefault: false };
+  }
+  if (raw && typeof raw === "object") {
+    const obj = raw;
+    if (obj.enabled === false) {
+      return { enabled: false, setDefault: false };
+    }
+    return {
+      enabled: true,
+      setDefault: obj.default !== false,
+      model: typeof obj.model === "string" && obj.model.trim() ? obj.model.trim() : void 0
+    };
+  }
+  return { enabled: true, setDefault: true };
+}
+async function registerV2WebSearch(ctx, deps) {
+  if (!ctx.websearch || typeof ctx.websearch.transform !== "function") {
+    return void 0;
+  }
+  const config = resolveWebSearchConfig(ctx.options);
+  if (!config.enabled) {
+    return void 0;
+  }
+  const runSearchWithAuth = async (query, signal, forceRefresh) => {
+    let auth = await resolveActiveOAuthCredential(ctx.integration);
+    if (!auth?.refresh) {
+      throw new Error(
+        "Not signed in to Antigravity CLI. Run `opencode auth login` and connect Antigravity CLI."
+      );
+    }
+    if (forceRefresh || !auth.access || accessTokenExpired(auth)) {
+      if (forceRefresh) {
+        clearCachedAuth(auth.refresh);
+        invalidateProjectContextCache(auth.refresh);
+      }
+      const refreshed = await refreshAccessToken(
+        forceRefresh ? { ...auth, expires: 0 } : auth,
+        persistAuthClient2
+      );
+      if (!refreshed) {
+        throw new Error(
+          "Failed to refresh Google Antigravity OAuth token for web search. Reconnect Antigravity CLI."
+        );
+      }
+      auth = refreshed;
+    }
+    const configuredProjectId = deps.getConfiguredProjectId();
+    let effectiveProjectId;
+    try {
+      const projectCtx = await ensureProjectContext(
+        auth,
+        persistAuthClient2,
+        configuredProjectId,
+        config.model
+      );
+      effectiveProjectId = projectCtx.effectiveProjectId;
+      auth = projectCtx.auth;
+    } catch (error) {
+      const fallbackParts = parseRefreshParts(auth.refresh);
+      const fallbackProject = configuredProjectId || fallbackParts.managedProjectId || fallbackParts.projectId;
+      if (!fallbackProject) {
+        throw error;
+      }
+      effectiveProjectId = fallbackProject;
+    }
+    const results = await executeAgyWebSearch({
+      query,
+      accessToken: auth.access,
+      projectId: effectiveProjectId,
+      model: config.model,
+      signal
+    });
+    return { results, auth };
+  };
+  const registration = await ctx.websearch.transform((editor) => {
+    if (!editor) return;
+    editor.add({
+      id: AGY_PROVIDER_ID,
+      name: "Antigravity CLI",
+      execute: async ({ query }, { signal }) => {
+        try {
+          const { results } = await runSearchWithAuth(query, signal, false);
+          return results;
+        } catch (error) {
+          const status = error?.response?.status;
+          if (status === 401 && !signal.aborted) {
+            const { results } = await runSearchWithAuth(query, signal, true);
+            return results;
+          }
+          throw error;
+        }
+      }
+    });
+    if (config.setDefault && editor.default.get() === void 0) {
+      editor.default.set(AGY_PROVIDER_ID);
+    }
+  });
+  if (registration && typeof registration.dispose === "function") {
+    return () => registration.dispose();
+  }
+  return void 0;
+}
+
 // src/plugin/v2.ts
 var GOOGLE_PROVIDER_PACKAGE = "@opencode/ai/providers/google";
 var OAUTH_METHOD_ID = "oauth";
-var persistAuthClient2 = {
+var persistAuthClient3 = {
   auth: {
     async set({ body }) {
       try {
@@ -8235,7 +8606,7 @@ async function setupOpenCodeV2(ctx) {
             try {
               const projectContext = await ensureProjectContext(
                 authRecord,
-                persistAuthClient2,
+                persistAuthClient3,
                 getConfiguredProjectId()
               );
               authRecord = {
@@ -8271,7 +8642,7 @@ async function setupOpenCodeV2(ctx) {
             expires: credential.expires,
             metadata: credential.metadata
           },
-          persistAuthClient2
+          persistAuthClient3
         );
         if (!refreshed) {
           throw new Error(
@@ -8308,6 +8679,7 @@ async function setupOpenCodeV2(ctx) {
     }
   });
   await registerV2SessionHooks(ctx, { getConfiguredProjectId });
+  const disposeWebSearch = await registerV2WebSearch(ctx, { getConfiguredProjectId });
   let disposed = false;
   async function syncAvailableModels(authOverride) {
     if (disposed || typeof ctx.provider.reload !== "function") {
@@ -8317,7 +8689,7 @@ async function setupOpenCodeV2(ctx) {
       let auth = authOverride ?? await resolveActiveOAuthCredential(ctx.integration);
       if (!auth?.refresh) return;
       if (!auth.access || accessTokenExpired(auth)) {
-        const refreshed = await refreshAccessToken(auth, persistAuthClient2);
+        const refreshed = await refreshAccessToken(auth, persistAuthClient3);
         if (!refreshed) return;
         auth = refreshed;
       }
@@ -8344,8 +8716,9 @@ async function setupOpenCodeV2(ctx) {
     }
   }
   void syncAvailableModels();
-  return () => {
+  return async () => {
     disposed = true;
+    await disposeWebSearch?.();
     getDiskSignatureCache()?.shutdown();
     shutdownTurnStateTracker();
     shutdownRetryCooldowns();
@@ -8366,8 +8739,11 @@ export {
   createV2PluginDefinition,
   index_default as default,
   defineOpenCodeV2Plugin,
+  executeAgyWebSearch,
+  parseAgyWebSearchPayload,
   resolveModelTier,
   resolveModelVariants,
+  resolveWebSearchConfig,
   setupOpenCodeV2,
   v2PluginDefinition
 };

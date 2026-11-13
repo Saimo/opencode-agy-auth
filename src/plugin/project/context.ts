@@ -151,7 +151,14 @@ export async function ensureProjectContext(
   if (cacheKey) {
     const cached = projectContextResultCache.get(cacheKey);
     if (cached) {
-      return cached;
+      return {
+        ...cached,
+        auth: {
+          ...cached.auth,
+          access: auth.access,
+          expires: auth.expires,
+        },
+      };
     }
     const pending = projectContextPendingCache.get(cacheKey);
     if (pending) {

@@ -7,6 +7,9 @@ import {
   TIER_MAPPING,
   resolveModelTier,
   resolveModelVariants,
+  executeAgyWebSearch,
+  parseAgyWebSearchPayload,
+  resolveWebSearchConfig,
 } from "./src/plugin/v2";
 
 export {
@@ -18,6 +21,9 @@ export {
   TIER_MAPPING,
   resolveModelTier,
   resolveModelVariants,
+  executeAgyWebSearch,
+  parseAgyWebSearchPayload,
+  resolveWebSearchConfig,
 };
 export * from "./src/plugin/types";
 
