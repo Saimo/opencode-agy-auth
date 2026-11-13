@@ -1,5 +1,14 @@
-import { AGY_PROVIDER_ID } from "../constants";
-import { STATIC_MODELS_SIMPLE, TIER_MAPPING, resolveModelTier, type SimpleStaticModel } from "./tier";
+import { AGY_CODE_ASSIST_ENDPOINT, AGY_PROVIDER_ID } from "../constants";
+import { agyFetch } from "../fetch";
+import {
+  STATIC_MODELS_SIMPLE,
+  TIER_MAPPING,
+  getEffectiveTierMapping,
+  registerDynamicTierVariant,
+  resetDynamicTierMappingsForTesting,
+  resolveModelTier,
+  type SimpleStaticModel,
+} from "./tier";
 import {
   defineOpenCodeV2Plugin,
   type OAuthAuthDetails,
@@ -14,7 +23,7 @@ import {
 } from "./types";
 import { authorizeAgy, exchangeAgyWithVerifier } from "../sdk/oauth";
 import { parseOAuthCallbackInput } from "./oauth-authorize";
-import { formatRefreshParts } from "./auth";
+import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from "./auth";
 import { ensureProjectContext } from "./project";
 import { resolveConfiguredProjectId } from "./provider";
 import { refreshAccessToken } from "./token";
@@ -23,9 +32,11 @@ import {
   saveStoredAuthToJson,
   setStoredAuthOverrideForTesting,
 } from "./v2-storage";
-import { registerV2SessionHooks } from "./v2-session";
+import { registerV2SessionHooks, resolveActiveOAuthCredential } from "./v2-session";
 import { initDiskSignatureCache, getDiskSignatureCache, resetDiskSignatureCacheForTesting } from "./cache";
 import { initTurnStateTracker, shutdownTurnStateTracker } from "../sdk/request";
+import { registerDynamicModelEnum, resetDynamicModelEnumsForTesting } from "../sdk/request/prepare";
+import { buildAgyCliUserAgent } from "../sdk/user-agent";
 import { initCooldownPersistence, shutdownRetryCooldowns } from "../sdk/retry";
 
 export { getSafeHeader, setSafeHeaders, toUrlString } from "./headers";
@@ -52,14 +63,24 @@ const persistAuthClient: PluginClient = {
   },
 };
 
+const ORDERED_TIERS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+const TIER_SUFFIX_REGEX = /^(.+)-(minimal|low|medium|high|xhigh)$/;
+
+const dynamicModels = new Map<string, SimpleStaticModel>();
+
+export function resetDynamicModelsForTesting(): void {
+  dynamicModels.clear();
+  resetDynamicTierMappingsForTesting();
+  resetDynamicModelEnumsForTesting();
+}
+
 export function resolveModelVariants(modelId: string): OpenCodeV2ModelVariant[] {
-  const mapping = TIER_MAPPING[modelId];
+  const mapping = getEffectiveTierMapping(modelId);
   if (!mapping) return [];
 
-  const orderedTiers = ["minimal", "low", "medium", "high", "xhigh"] as const;
   const variants: OpenCodeV2ModelVariant[] = [];
 
-  for (const tier of orderedTiers) {
+  for (const tier of ORDERED_TIERS) {
     if (mapping[tier] !== undefined) {
       variants.push({
         id: tier,
@@ -69,6 +90,135 @@ export function resolveModelVariants(modelId: string): OpenCodeV2ModelVariant[] 
   }
 
   return variants;
+}
+
+interface RawAvailableModelEntry {
+  displayName?: string;
+  maxTokens?: number;
+  maxOutputTokens?: number;
+  model?: string;
+  disabled?: boolean;
+  supportsImages?: boolean;
+  supportsThinking?: boolean;
+}
+
+function shouldSkipInternalModel(modelId: string, entry?: RawAvailableModelEntry): boolean {
+  if (!modelId || entry?.disabled === true) return true;
+  if (
+    modelId.startsWith("chat_") ||
+    modelId.startsWith("tab_") ||
+    modelId.endsWith("-tiered") ||
+    modelId.endsWith("-disabled") ||
+    modelId.includes("-image") ||
+    modelId === "gemini-2.5-flash-thinking"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Ingests a Code Assist `:fetchAvailableModels` payload, updating live `MODEL_PLACEHOLDER_M*`
+ * enums and registering any newly available `agy` models or tier variants.
+ * Returns `true` if any new models or tier variants were added.
+ */
+export function ingestAvailableModelsResponse(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload as {
+    models?: Record<string, RawAvailableModelEntry>;
+    agentModelSorts?: Array<{ groups?: Array<{ modelIds?: string[] }> }>;
+  };
+
+  const modelsMap = record.models && typeof record.models === "object" ? record.models : {};
+  for (const [modelId, entry] of Object.entries(modelsMap)) {
+    if (entry && typeof entry.model === "string") {
+      registerDynamicModelEnum(modelId, entry.model);
+    }
+  }
+
+  const candidateIds = new Set<string>();
+  if (Array.isArray(record.agentModelSorts)) {
+    for (const sort of record.agentModelSorts) {
+      for (const group of sort?.groups ?? []) {
+        for (const id of group?.modelIds ?? []) {
+          if (typeof id === "string") candidateIds.add(id);
+        }
+      }
+    }
+  }
+  for (const id of Object.keys(modelsMap)) {
+    candidateIds.add(id);
+  }
+
+  // Count tier siblings so standalone models like `gpt-oss-120b-medium` stay standalone
+  const tierSiblingCounts = new Map<string, number>();
+  for (const id of candidateIds) {
+    const entry = modelsMap[id];
+    if (shouldSkipInternalModel(id, entry)) continue;
+    const match = id.match(TIER_SUFFIX_REGEX);
+    if (match?.[1] && !STATIC_MODELS_SIMPLE[id]) {
+      tierSiblingCounts.set(match[1], (tierSiblingCounts.get(match[1]) ?? 0) + 1);
+    }
+  }
+
+  let changed = false;
+
+  for (const id of candidateIds) {
+    const entry = modelsMap[id];
+    if (shouldSkipInternalModel(id, entry)) continue;
+
+    // If explicitly registered as a standalone static model, keep it standalone
+    if (STATIC_MODELS_SIMPLE[id]) {
+      continue;
+    }
+
+    const match = id.match(TIER_SUFFIX_REGEX);
+    const baseId = match?.[1];
+    const tier = match?.[2];
+    const isGroupedTieredModel =
+      Boolean(baseId && tier) &&
+      (Boolean(baseId && (STATIC_MODELS_SIMPLE[baseId] || TIER_MAPPING[baseId])) ||
+        (baseId ? (tierSiblingCounts.get(baseId) ?? 0) >= 2 : false));
+
+    if (isGroupedTieredModel && baseId && tier) {
+      if (registerDynamicTierVariant(baseId, tier, id)) {
+        changed = true;
+      }
+      if (!STATIC_MODELS_SIMPLE[baseId] && !dynamicModels.has(baseId)) {
+        const cleanName = (entry?.displayName || baseId)
+          .replace(/\s*\((Minimal|Low|Medium|High|XHigh)\)\s*$/i, "")
+          .trim();
+        dynamicModels.set(baseId, {
+          name: cleanName || baseId,
+          description: `${cleanName || baseId} model. Select tier at runtime.`,
+          maxTokens: typeof entry?.maxTokens === "number" ? entry.maxTokens : 1048576,
+          maxOutputTokens: typeof entry?.maxOutputTokens === "number" ? entry.maxOutputTokens : 65536,
+          toolCall: true,
+          reasoning: entry?.supportsThinking ?? true,
+          attachment: entry?.supportsImages ?? !baseId.startsWith("gpt-"),
+        });
+        changed = true;
+      }
+      continue;
+    }
+
+    // Standalone model not in STATIC_MODELS_SIMPLE
+    if (!dynamicModels.has(id)) {
+      const displayName = entry?.displayName?.trim() || id;
+      dynamicModels.set(id, {
+        name: displayName,
+        description: `${displayName} model via Antigravity CLI.`,
+        maxTokens: typeof entry?.maxTokens === "number" ? entry.maxTokens : 1048576,
+        maxOutputTokens: typeof entry?.maxOutputTokens === "number" ? entry.maxOutputTokens : 65536,
+        toolCall: true,
+        reasoning: entry?.supportsThinking ?? true,
+        attachment: entry?.supportsImages ?? !id.startsWith("gpt-"),
+      });
+      changed = true;
+    }
+  }
+
+  return changed;
 }
 
 function resolveModelFamily(modelId: string): string {
@@ -230,6 +380,8 @@ export async function setupOpenCodeV2(ctx: OpenCodeV2PluginContext): Promise<Ope
               // Non-fatal: OpenCode v2 persists credentials natively in Credential.Service
             }
 
+            void syncAvailableModels(authRecord);
+
             return {
               type: "oauth",
               methodID: OAUTH_METHOD_ID,
@@ -277,7 +429,7 @@ export async function setupOpenCodeV2(ctx: OpenCodeV2PluginContext): Promise<Ope
     });
   });
 
-  // 2. Register google-agy provider and its static model catalog
+  // 2. Register google-agy provider and its static + dynamically discovered model catalog
   await ctx.provider.transform((editor) => {
     if (!editor) return;
 
@@ -288,12 +440,65 @@ export async function setupOpenCodeV2(ctx: OpenCodeV2PluginContext): Promise<Ope
         applyModelInfo(model, modelId, simple);
       });
     }
+
+    for (const [modelId, simple] of dynamicModels.entries()) {
+      editor.models.update(AGY_PROVIDER_ID, modelId, (model) => {
+        applyModelInfo(model, modelId, simple);
+      });
+    }
   });
 
   // 3. Register session HTTP request/response rewriting and quota-aware retry hooks
   await registerV2SessionHooks(ctx, { getConfiguredProjectId });
 
+  let disposed = false;
+
+  async function syncAvailableModels(authOverride?: OAuthAuthDetails): Promise<void> {
+    if (disposed || typeof ctx.provider.reload !== "function") {
+      return;
+    }
+
+    try {
+      let auth = authOverride ?? (await resolveActiveOAuthCredential(ctx.integration));
+      if (!auth?.refresh) return;
+
+      if (!auth.access || accessTokenExpired(auth)) {
+        const refreshed = await refreshAccessToken(auth, persistAuthClient);
+        if (!refreshed) return;
+        auth = refreshed;
+      }
+
+      const parts = parseRefreshParts(auth.refresh);
+      const project = getConfiguredProjectId() || parts.managedProjectId || parts.projectId;
+      if (!project) return;
+
+      const resp = await agyFetch(`${AGY_CODE_ASSIST_ENDPOINT}/v1internal:fetchAvailableModels`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.access}`,
+          "User-Agent": buildAgyCliUserAgent(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ project }),
+      });
+
+      if (!resp.ok || disposed) return;
+      const payload = await resp.json();
+      if (disposed) return;
+
+      const addedNewModelsOrVariants = ingestAvailableModelsResponse(payload);
+      if (addedNewModelsOrVariants && !disposed) {
+        await ctx.provider.reload();
+      }
+    } catch {
+      // Best-effort background catalog refresh; static catalog remains active
+    }
+  }
+
+  void syncAvailableModels();
+
   return () => {
+    disposed = true;
     getDiskSignatureCache()?.shutdown();
     shutdownTurnStateTracker();
     shutdownRetryCooldowns();

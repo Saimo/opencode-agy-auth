@@ -127,9 +127,27 @@ export function prepareAgyRequest(
 export const LEGACY_MODEL_ENUM_FALLBACKS: Record<string, string> = {
   "gemini-3.1-pro-high": "MODEL_PLACEHOLDER_M16",
   "gemini-pro-agent": "MODEL_PLACEHOLDER_M16",
+  "gemini-pro-orchestrator": "MODEL_PLACEHOLDER_M667",
+  "gemini-pro-orchestrator-argon": "MODEL_PLACEHOLDER_M668",
 };
 
+const dynamicModelEnums = new Map<string, string>();
+
+export function registerDynamicModelEnum(modelName: string, modelEnum: string): void {
+  if (modelName && modelEnum) {
+    dynamicModelEnums.set(modelName, modelEnum);
+  }
+}
+
+export function resetDynamicModelEnumsForTesting(): void {
+  dynamicModelEnums.clear();
+}
+
 export function getModelEnum(modelName: string): string {
+  const dynamicEnum = dynamicModelEnums.get(modelName);
+  if (dynamicEnum) {
+    return dynamicEnum;
+  }
   const deprecated = (modelsJson as any).deprecatedModelIds;
   if (deprecated && deprecated[modelName]) {
     const entry = deprecated[modelName];

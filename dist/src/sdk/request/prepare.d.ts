@@ -13,6 +13,8 @@ export declare function prepareAgyRequest(input: RequestInfo, init: RequestInit 
     sessionId?: string;
 };
 export declare const LEGACY_MODEL_ENUM_FALLBACKS: Record<string, string>;
+export declare function registerDynamicModelEnum(modelName: string, modelEnum: string): void;
+export declare function resetDynamicModelEnumsForTesting(): void;
 export declare function getModelEnum(modelName: string): string;
 export declare function isClaudeModel(model: string): boolean;
 export declare function sanitizeClaudeThinkingParts(contents: any[], model: string, sessionId?: string): void;

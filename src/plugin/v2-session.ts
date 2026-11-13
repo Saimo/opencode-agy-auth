@@ -83,7 +83,7 @@ function stripUrlApiKeys(rawUrl: string): string {
   }
 }
 
-async function resolveActiveOAuthCredential(
+export async function resolveActiveOAuthCredential(
   integration?: OpenCodeV2IntegrationDomain,
 ): Promise<OAuthAuthDetails | undefined> {
   const connApi = integration?.connection;

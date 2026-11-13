@@ -14,6 +14,18 @@ var AGY_REDIRECT_URI = "https://antigravity.google/oauth-callback";
 var AGY_CODE_ASSIST_ENDPOINT = process.env.OPENCODE_AGY_ENDPOINT || "https://daily-cloudcode-pa.googleapis.com";
 var AGY_GENERATIVE_LANGUAGE_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
 
+// src/fetch.ts
+function agyFetch(input, init) {
+  const proxy = process.env.OPENCODE_AGY_AUTH_PROXY;
+  if (!proxy) {
+    return fetch(input, init);
+  }
+  return fetch(input, {
+    ...init ?? {},
+    proxy
+  });
+}
+
 // src/plugin/headers.ts
 function getSafeHeader(headers, key) {
   if (!headers) {
@@ -54,11 +66,11 @@ function toUrlString(value) {
 
 // src/plugin/tier.ts
 var STATIC_MODELS_SIMPLE = {
-  "gemini-3.8-flash": {
-    name: "Gemini 3.8 Flash",
-    description: "Gemini 3.8 Flash base model. Select tier at runtime.",
+  "gemini-4-carbon": {
+    name: "Gemini 4 Carbon",
+    description: "Gemini 4 Carbon flagship reasoning model. Select tier at runtime.",
     maxTokens: 1048576,
-    maxOutputTokens: 65536,
+    maxOutputTokens: 262144,
     toolCall: true,
     reasoning: true,
     attachment: true
@@ -77,6 +89,87 @@ var STATIC_MODELS_SIMPLE = {
     description: "Gemini 4 Hydrogen base model. Select tier at runtime.",
     maxTokens: 1048576,
     maxOutputTokens: 262144,
+    toolCall: true,
+    reasoning: true,
+    attachment: true
+  },
+  "gemini-pro-orchestrator": {
+    name: "Orchestrator (Carbon)",
+    description: "Antigravity multi-agent orchestrator powered by Gemini 4 Carbon.",
+    maxTokens: 1048576,
+    maxOutputTokens: 262144,
+    toolCall: true,
+    reasoning: true,
+    attachment: true
+  },
+  "gemini-pro-orchestrator-argon": {
+    name: "Orchestrator (Argon)",
+    description: "Antigravity multi-agent orchestrator powered by Gemini 4 Argon.",
+    maxTokens: 1048576,
+    maxOutputTokens: 65536,
+    toolCall: true,
+    reasoning: true,
+    attachment: true
+  },
+  "gemini-3.8-flash": {
+    name: "Gemini 3.8 Flash",
+    description: "Gemini 3.8 Flash base model. Select tier at runtime.",
+    maxTokens: 1048576,
+    maxOutputTokens: 65536,
+    toolCall: true,
+    reasoning: true,
+    attachment: true
+  },
+  "gemini-3.5-flash-lite": {
+    name: "Gemini 3.5 Flash Lite",
+    description: "Fast, lightweight Gemini 3.5 Flash Lite model.",
+    maxTokens: 1048576,
+    maxOutputTokens: 65535,
+    toolCall: true,
+    reasoning: true,
+    attachment: true
+  },
+  "gemini-3.1-flash-lite": {
+    name: "Gemini 3.1 Flash Lite",
+    description: "Fast, lightweight Gemini 3.1 Flash Lite model.",
+    maxTokens: 1048576,
+    maxOutputTokens: 65535,
+    toolCall: true,
+    reasoning: true,
+    attachment: true
+  },
+  "gemini-3-flash": {
+    name: "Gemini 3 Flash",
+    description: "Gemini 3 Flash high-throughput multimodal model.",
+    maxTokens: 1048576,
+    maxOutputTokens: 65536,
+    toolCall: true,
+    reasoning: true,
+    attachment: true
+  },
+  "gemini-2.5-pro": {
+    name: "Gemini 2.5 Pro",
+    description: "Gemini 2.5 Pro reasoning model.",
+    maxTokens: 1048576,
+    maxOutputTokens: 65535,
+    toolCall: true,
+    reasoning: true,
+    attachment: true
+  },
+  "gemini-2.5-flash": {
+    name: "Gemini 2.5 Flash",
+    description: "Gemini 2.5 Flash fast multimodal model.",
+    maxTokens: 1048576,
+    maxOutputTokens: 65535,
+    toolCall: true,
+    reasoning: true,
+    attachment: true
+  },
+  "gemini-2.5-flash-lite": {
+    name: "Gemini 2.5 Flash Lite",
+    description: "Gemini 2.5 Flash Lite lightweight chat model.",
+    maxTokens: 1048576,
+    maxOutputTokens: 65535,
     toolCall: true,
     reasoning: true,
     attachment: true
@@ -101,7 +194,7 @@ var STATIC_MODELS_SIMPLE = {
   },
   "gpt-oss-120b-medium": {
     name: "GPT-OSS 120B (Medium)",
-    description: "GPT open-source 120B parameter medium tier model, excellent performance in local deployment or specific open-source benchmarks.",
+    description: "GPT open-source 120B parameter medium tier model.",
     maxTokens: 131072,
     maxOutputTokens: 32768,
     toolCall: true,
@@ -110,10 +203,10 @@ var STATIC_MODELS_SIMPLE = {
   }
 };
 var TIER_MAPPING = {
-  "gemini-3.8-flash": {
-    low: "gemini-3.8-flash-low",
-    medium: "gemini-3.8-flash-medium",
-    high: "gemini-3.8-flash-high"
+  "gemini-4-carbon": {
+    low: "gemini-4-carbon-low",
+    medium: "gemini-4-carbon-medium",
+    high: "gemini-4-carbon-high"
   },
   "gemini-4-argon": {
     low: "gemini-4-argon-low",
@@ -126,6 +219,11 @@ var TIER_MAPPING = {
     high: "gemini-4-hydrogen-high",
     xhigh: "gemini-4-hydrogen-xhigh"
   },
+  "gemini-3.8-flash": {
+    low: "gemini-3.8-flash-low",
+    medium: "gemini-3.8-flash-medium",
+    high: "gemini-3.8-flash-high"
+  },
   "claude-opus-5-5": {
     low: "claude-opus-5-5-low",
     medium: "claude-opus-5-5-medium",
@@ -137,11 +235,32 @@ var TIER_MAPPING = {
     high: "claude-sonnet-5-5-high"
   }
 };
+var dynamicTierMapping = {};
+function registerDynamicTierVariant(baseModelId, tier, targetModelId) {
+  const existingStatic = TIER_MAPPING[baseModelId]?.[tier];
+  if (existingStatic === targetModelId) {
+    return false;
+  }
+  const bucket = dynamicTierMapping[baseModelId] ?? (dynamicTierMapping[baseModelId] = {});
+  if (bucket[tier] === targetModelId) {
+    return false;
+  }
+  bucket[tier] = targetModelId;
+  return true;
+}
+function getEffectiveTierMapping(baseModelId) {
+  const staticMap = TIER_MAPPING[baseModelId];
+  const dynamicMap = dynamicTierMapping[baseModelId];
+  if (!staticMap && !dynamicMap) {
+    return void 0;
+  }
+  return dynamicMap ? { ...staticMap, ...dynamicMap } : staticMap;
+}
 function resolveModelTier(baseModelId, headersOrInit) {
   const parts = baseModelId.split("@");
   const base = parts[0] || "";
   const suffixTier = parts[1]?.toLowerCase();
-  const mapping = TIER_MAPPING[base];
+  const mapping = getEffectiveTierMapping(base);
   if (!mapping) {
     return baseModelId;
   }
@@ -151,7 +270,7 @@ function resolveModelTier(baseModelId, headersOrInit) {
   if (requestedTier && Object.prototype.hasOwnProperty.call(mapping, requestedTier)) {
     return mapping[requestedTier] || baseModelId;
   }
-  return mapping["medium"] ?? mapping["high"] ?? baseModelId;
+  return mapping["medium"] ?? mapping["high"] ?? mapping["low"] ?? baseModelId;
 }
 
 // src/plugin/types.ts
@@ -161,20 +280,6 @@ function defineOpenCodeV2Plugin(def) {
 
 // src/sdk/oauth.ts
 import { createHash, randomBytes } from "crypto";
-
-// src/fetch.ts
-function agyFetch(input, init) {
-  const proxy = process.env.OPENCODE_AGY_AUTH_PROXY;
-  if (!proxy) {
-    return fetch(input, init);
-  }
-  return fetch(input, {
-    ...init ?? {},
-    proxy
-  });
-}
-
-// src/sdk/oauth.ts
 function generatePkcePair() {
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
@@ -2092,6 +2197,9 @@ var models_default = {
       groups: [
         {
           modelIds: [
+            "gemini-4-carbon-medium",
+            "gemini-4-carbon-high",
+            "gemini-4-carbon-low",
             "gemini-4-argon-medium",
             "gemini-4-argon-high",
             "gemini-4-argon-low",
@@ -2108,8 +2216,7 @@ var models_default = {
             "claude-sonnet-5-5-low",
             "claude-sonnet-5-5-medium",
             "claude-sonnet-5-5-high",
-            "gpt-oss-120b-medium",
-            "gemini-4-carbon-disabled"
+            "gpt-oss-120b-medium"
           ]
         }
       ]
@@ -2124,25 +2231,16 @@ var models_default = {
   commitMessageModelIds: [
     "gemini-3.5-flash-lite"
   ],
-  defaultAgentModelId: "gemini-4-argon-medium",
+  defaultAgentModelId: "gemini-4-carbon-medium",
   experimentIds: [
-    106826239,
-    106828853,
-    106827293,
-    106826316,
-    106828852,
-    106827294,
-    106791760,
-    106786387,
-    106791766,
-    106865005,
-    106865006,
-    106865004,
-    106828854,
-    1714252,
+    106829006,
+    106829005,
+    106829001,
+    106829007,
+    1714253,
     106140402,
     106815069,
-    106805272,
+    106805876,
     105979552,
     105979574,
     106015333,
@@ -2151,7 +2249,6 @@ var models_default = {
     106749607,
     106123599,
     107042622,
-    106121401,
     106100625,
     106754391,
     106143956,
@@ -2179,16 +2276,15 @@ var models_default = {
     106032303,
     106228452,
     106825244,
-    106121607,
+    106121606,
     106644207,
-    106848320,
+    106848342,
     105979531,
     105979553,
     106015328,
     106568390,
     105867469,
     106123597,
-    106121399,
     106100654,
     106064028,
     106640124,
@@ -2198,9 +2294,7 @@ var models_default = {
     106032301,
     106825242,
     106121604,
-    106644204,
-    106778026,
-    106786388
+    106644204
   ],
   imageGenerationModelIds: [
     "gemini-3.1-flash-image"
@@ -2259,8 +2353,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_ANTHROPIC",
       quotaInfo: {
-        remainingFraction: 0.4823316,
-        resetTime: "2026-11-19T13:17:30Z"
+        remainingFraction: 0.9974441,
+        resetTime: "2026-11-14T01:36:42Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2300,8 +2394,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_ANTHROPIC",
       quotaInfo: {
-        remainingFraction: 0.4823316,
-        resetTime: "2026-11-19T13:17:30Z"
+        remainingFraction: 0.9974441,
+        resetTime: "2026-11-14T01:36:42Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2341,8 +2435,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_ANTHROPIC",
       quotaInfo: {
-        remainingFraction: 0.4823316,
-        resetTime: "2026-11-19T13:17:30Z"
+        remainingFraction: 0.9974441,
+        resetTime: "2026-11-14T01:36:42Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2382,8 +2476,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_ANTHROPIC",
       quotaInfo: {
-        remainingFraction: 0.4823316,
-        resetTime: "2026-11-19T13:17:30Z"
+        remainingFraction: 0.9974441,
+        resetTime: "2026-11-14T01:36:42Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2423,8 +2517,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_ANTHROPIC",
       quotaInfo: {
-        remainingFraction: 0.4823316,
-        resetTime: "2026-11-19T13:17:30Z"
+        remainingFraction: 0.9974441,
+        resetTime: "2026-11-14T01:36:42Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2464,8 +2558,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_ANTHROPIC",
       quotaInfo: {
-        remainingFraction: 0.4823316,
-        resetTime: "2026-11-19T13:17:30Z"
+        remainingFraction: 0.9974441,
+        resetTime: "2026-11-14T01:36:42Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2503,8 +2597,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2525,6 +2619,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -2588,8 +2683,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2610,6 +2705,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -2673,8 +2769,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2695,6 +2791,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -2755,8 +2852,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       requiresImageOutputOutsideFunctionResponses: true,
@@ -2778,6 +2875,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -2837,8 +2935,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2859,6 +2957,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -2911,8 +3010,8 @@ var models_default = {
       model: "MODEL_PLACEHOLDER_M21",
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       supportedMimeTypes: {
         "application/json": true,
@@ -2962,8 +3061,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -2984,6 +3083,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -3047,8 +3147,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -3069,6 +3169,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -3162,8 +3263,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -3184,6 +3285,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -3226,6 +3328,8 @@ var models_default = {
       supportsImages: true,
       supportsThinking: true,
       supportsVideo: true,
+      tagDescription: "Limited time",
+      tagTitle: "Fast",
       thinkingLevel: 3
     },
     "gemini-3.8-flash-low": {
@@ -3277,8 +3381,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -3299,6 +3403,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -3341,6 +3446,8 @@ var models_default = {
       supportsImages: true,
       supportsThinking: true,
       supportsVideo: true,
+      tagDescription: "Limited time",
+      tagTitle: "Fast",
       thinkingLevel: 1
     },
     "gemini-3.8-flash-medium": {
@@ -3392,8 +3499,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -3414,6 +3521,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -3456,6 +3564,8 @@ var models_default = {
       supportsImages: true,
       supportsThinking: true,
       supportsVideo: true,
+      tagDescription: "Limited time",
+      tagTitle: "Fast",
       thinkingLevel: 2
     },
     "gemini-3.8-flash-tiered": {
@@ -3506,8 +3616,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -3528,6 +3638,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -3627,8 +3738,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.046211068,
-        resetTime: "2026-11-15T10:14:10Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -3649,6 +3760,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -3749,8 +3861,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.046211068,
-        resetTime: "2026-11-15T10:14:10Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -3771,6 +3883,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -3871,8 +3984,8 @@ var models_default = {
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.046211068,
-        resetTime: "2026-11-15T10:14:10Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -3893,6 +4006,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -3938,14 +4052,13 @@ var models_default = {
       tagTitle: "New",
       thinkingLevel: 2
     },
-    "gemini-4-carbon-disabled": {
+    "gemini-4-carbon-high": {
       apiProvider: "API_PROVIDER_GOOGLE_GEMINI",
-      disabled: true,
-      displayName: "Gemini 4 Carbon",
+      displayName: "Gemini 4 Carbon (High)",
       maxOutputTokens: 262144,
       maxTokens: 1048576,
       minThinkingBudget: 128,
-      model: "MODEL_PLACEHOLDER_M670",
+      model: "MODEL_PLACEHOLDER_M427",
       modelExperimentIds: [
         "sonar"
       ],
@@ -3993,6 +4106,10 @@ var models_default = {
         }
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
+      quotaInfo: {
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
+      },
       recommended: true,
       supportedMimeTypes: {
         "application/json": true,
@@ -4012,6 +4129,7 @@ var models_default = {
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -4054,8 +4172,253 @@ var models_default = {
       supportsImages: true,
       supportsThinking: true,
       supportsVideo: true,
-      tagDescription: "Gemini 4 Carbon is currently available to Ultra plan subscribers.",
-      tagTitle: "Unavailable",
+      tagTitle: "New",
+      thinkingLevel: 3
+    },
+    "gemini-4-carbon-low": {
+      apiProvider: "API_PROVIDER_GOOGLE_GEMINI",
+      displayName: "Gemini 4 Carbon (Low)",
+      maxOutputTokens: 262144,
+      maxTokens: 1048576,
+      minThinkingBudget: 128,
+      model: "MODEL_PLACEHOLDER_M438",
+      modelExperimentIds: [
+        "sonar"
+      ],
+      modelExperiments: {
+        experiments: {
+          CASCADE_USE_EXPERIMENT_CHECKPOINTER: {
+            stringValue: `{
+    "strategy": "CHECKPOINT_STRATEGY_SAME_MODEL",
+    "max_token_limit": "256000",
+    "token_threshold": "50000",
+    "max_overhead_ratio": "0.15",
+    "enabled": true,
+    "max_output_tokens": "32768",
+    "checkpoint_model": "MODEL_PLACEHOLDER_M50",
+    "use_last_planner_model": true,
+    "is_sync": true,
+    "max_user_requests": 10,
+    "include_last_user_message": true,
+    "include_conversation_log": false,
+    "include_running_task_snapshots": true,
+    "include_subagent_snapshots": true,
+    "include_artifact_snapshots": true,
+    "retry_config": {
+        "max_retries": 4,
+        "initial_sleep_duration_ms": 1000,
+        "exponential_multiplier": 2,
+        "include_error_feedback": false
+    },
+    "session_summary_prompt_override": "You have been working on the task described above but have not yet completed\\nit. Write a continuation summary that will allow you (or another instance of\\nyourself) to resume work efficiently in a future context window where the\\nfull conversation history will NOT be available\\u2014only this summary.\\n\\nThis summary is all that will be available to you going forward in the future\\ncontext window. Do not call any tools, simply just provide the summary based on\\nthe information available in the current context window.\\n\\nYour summary must be structured, concise, and actionable. Optimize for enabling immediate resumption with zero redundant work.\\n\\nInclude the following sections:\\n\\n1. **Task Overview**\\n   - The user's core request, success criteria, and requested deliverables. Record any target IDs, URLs, or reporting recipients from the request.\\n   - Scope boundaries or task-specific constraints\\n   - Any ambiguities that were resolved (and how)\\n\\n2. **Progress**\\n   - What has been completed, with concrete references (file paths,\\n     test or verification commands run and their outcomes, resource identifiers, tool outputs, URLs, etc.)\\n   - Key plans, design docs, or artifacts produced and their current state\\n   - Skills, documentation, or reference files that were read or inspected\\n   - What is in progress or only inspected/planned, and its current state. Distinguish completed edits from files that were only read or partially edited, and do not mark unverified test commands as completed or passed.\\n\\n3. **Key Findings**\\n   - Technical constraints, requirements, or domain details uncovered\\n   - Decisions made and their rationale\\n\\n4. **Errors & Fixes**\\n   This list should be exhaustive across the entire session so that no resolved or unresolved failure is omitted:\\n   - All errors, failed commands, or test/build failures encountered during the session. Include both errors that were resolved or worked around and any unresolved failures, with specific error messages and root causes.\\n   - How each error was fixed or worked around, and any user feedback on the error\\n   - Approaches that were tried and abandoned (and why\\u2014this prevents\\n     the successor from repeating them)\\n\\n5. **Active Context**\\n   - State of any external resources, sessions, environments, or multi-agent context, such as parent or child agents in use.\\n   - Relevant intermediate results, hypotheses, or working assumptions\\n   - Dependencies between components or steps\\n\\n6. **Next Steps**\\n   The next steps should provide all information required to continue working on the task. This includes any remaining features, bugs, points of investigation, and verification items. This list should be exhaustive, so that an agent working with this list can complete the full original task end-to-end. For example:\\n   - Remaining steps from any agreed plan, design doc, or active workflows and instructions, in priority order. Preserve specific uncompleted items rather than collapsing checklists into high-level summaries.\\n   - Remaining files to create, modify, move, copy, or delete, with the key changes needed in each\\n   - Remaining verification steps, test or build commands, or deliverables needed to complete the task\\n   - Any required cleanup, such as removing temporary files, debug code, or temporary configuration changes.\\n   - Known blockers, open questions, prerequisites, or risks for each step\\n\\n7. **Commitments & Constraints**\\n   - Standing rules, personas, or response formatting requirements from user instructions, rules files, or reference documents.\\n   - Promises made to the user (e.g., \\"I said I would do X before Y\\")\\n   - User preferences or style requirements\\n   - Any boundaries the user set on approach, tools, or scope\\n\\nBe concise but complete\\u2014err on the side of including concrete details needed to\\nprevent duplicate work, omitted plan steps, repeated mistakes, or broken promises.\\n\\nWrap your response in <summary></summary> tags.\\n",
+    "use_model_reported_token_count": true
+}`
+          },
+          "allow-experimental-monitors": {
+            boolValue: true
+          },
+          "cascade-include-ephemeral-message": {
+            stringValue: '{\n    "enabled": false,\n    "disabledHeuristics": ["planning_mode", "bash_command_reminder", "running_tasks_reminder"],\n    "staticMessages": [],\n    "useAllowlist": false,\n    "enabledHeuristics": []\n}'
+          },
+          retry_model_capacity_exhausted: {
+            boolValue: true
+          },
+          "task-details-suffix": {
+            stringValue: "\nYOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS: A) either proceed to other relevant work (if any) or, B) simply update the user with a short message (that you have launched the command and will wait for it to finish) and end the turn.\n DO NOTHING ELSE.\n When updating the user, always respond in the language of the user (defaulting to English). Never mix two or more languages in the same response."
+          }
+        }
+      },
+      modelProvider: "MODEL_PROVIDER_GOOGLE",
+      quotaInfo: {
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
+      },
+      recommended: true,
+      supportedMimeTypes: {
+        "application/json": true,
+        "application/msword": true,
+        "application/pdf": true,
+        "application/rtf": true,
+        "application/vnd.ms-excel": true,
+        "application/vnd.ms-powerpoint": true,
+        "application/vnd.oasis.opendocument.presentation": true,
+        "application/vnd.oasis.opendocument.spreadsheet": true,
+        "application/vnd.oasis.opendocument.text": true,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": true,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": true,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
+        "application/x-ipynb+json": true,
+        "application/x-javascript": true,
+        "application/x-python-code": true,
+        "application/x-typescript": true,
+        "audio/aac": true,
+        "audio/amr": true,
+        "audio/flac": true,
+        "audio/l16": true,
+        "audio/m4a": true,
+        "audio/mp3": true,
+        "audio/mp4": true,
+        "audio/mpeg": true,
+        "audio/ogg": true,
+        "audio/opus": true,
+        "audio/vnd.wave": true,
+        "audio/wav": true,
+        "audio/wave": true,
+        "audio/webm": true,
+        "audio/webm;codecs=opus": true,
+        "audio/x-m4a": true,
+        "audio/x-wav": true,
+        "image/heic": true,
+        "image/heif": true,
+        "image/jpeg": true,
+        "image/png": true,
+        "image/webp": true,
+        "text/css": true,
+        "text/csv": true,
+        "text/html": true,
+        "text/javascript": true,
+        "text/markdown": true,
+        "text/plain": true,
+        "text/rtf": true,
+        "text/x-python": true,
+        "text/x-python-script": true,
+        "text/x-typescript": true,
+        "text/xml": true,
+        "video/audio/s16le": true,
+        "video/audio/wav": true,
+        "video/jpeg2000": true,
+        "video/mp4": true,
+        "video/text/timestamp": true,
+        "video/videoframe/jpeg2000": true,
+        "video/webm": true
+      },
+      supportsImages: true,
+      supportsThinking: true,
+      supportsVideo: true,
+      tagTitle: "New",
+      thinkingLevel: 1
+    },
+    "gemini-4-carbon-medium": {
+      apiProvider: "API_PROVIDER_GOOGLE_GEMINI",
+      displayName: "Gemini 4 Carbon (Medium)",
+      maxOutputTokens: 262144,
+      maxTokens: 1048576,
+      minThinkingBudget: 128,
+      model: "MODEL_PLACEHOLDER_M437",
+      modelExperimentIds: [
+        "sonar"
+      ],
+      modelExperiments: {
+        experiments: {
+          CASCADE_USE_EXPERIMENT_CHECKPOINTER: {
+            stringValue: `{
+    "strategy": "CHECKPOINT_STRATEGY_SAME_MODEL",
+    "max_token_limit": "256000",
+    "token_threshold": "50000",
+    "max_overhead_ratio": "0.15",
+    "enabled": true,
+    "max_output_tokens": "32768",
+    "checkpoint_model": "MODEL_PLACEHOLDER_M50",
+    "use_last_planner_model": true,
+    "is_sync": true,
+    "max_user_requests": 10,
+    "include_last_user_message": true,
+    "include_conversation_log": false,
+    "include_running_task_snapshots": true,
+    "include_subagent_snapshots": true,
+    "include_artifact_snapshots": true,
+    "retry_config": {
+        "max_retries": 4,
+        "initial_sleep_duration_ms": 1000,
+        "exponential_multiplier": 2,
+        "include_error_feedback": false
+    },
+    "session_summary_prompt_override": "You have been working on the task described above but have not yet completed\\nit. Write a continuation summary that will allow you (or another instance of\\nyourself) to resume work efficiently in a future context window where the\\nfull conversation history will NOT be available\\u2014only this summary.\\n\\nThis summary is all that will be available to you going forward in the future\\ncontext window. Do not call any tools, simply just provide the summary based on\\nthe information available in the current context window.\\n\\nYour summary must be structured, concise, and actionable. Optimize for enabling immediate resumption with zero redundant work.\\n\\nInclude the following sections:\\n\\n1. **Task Overview**\\n   - The user's core request, success criteria, and requested deliverables. Record any target IDs, URLs, or reporting recipients from the request.\\n   - Scope boundaries or task-specific constraints\\n   - Any ambiguities that were resolved (and how)\\n\\n2. **Progress**\\n   - What has been completed, with concrete references (file paths,\\n     test or verification commands run and their outcomes, resource identifiers, tool outputs, URLs, etc.)\\n   - Key plans, design docs, or artifacts produced and their current state\\n   - Skills, documentation, or reference files that were read or inspected\\n   - What is in progress or only inspected/planned, and its current state. Distinguish completed edits from files that were only read or partially edited, and do not mark unverified test commands as completed or passed.\\n\\n3. **Key Findings**\\n   - Technical constraints, requirements, or domain details uncovered\\n   - Decisions made and their rationale\\n\\n4. **Errors & Fixes**\\n   This list should be exhaustive across the entire session so that no resolved or unresolved failure is omitted:\\n   - All errors, failed commands, or test/build failures encountered during the session. Include both errors that were resolved or worked around and any unresolved failures, with specific error messages and root causes.\\n   - How each error was fixed or worked around, and any user feedback on the error\\n   - Approaches that were tried and abandoned (and why\\u2014this prevents\\n     the successor from repeating them)\\n\\n5. **Active Context**\\n   - State of any external resources, sessions, environments, or multi-agent context, such as parent or child agents in use.\\n   - Relevant intermediate results, hypotheses, or working assumptions\\n   - Dependencies between components or steps\\n\\n6. **Next Steps**\\n   The next steps should provide all information required to continue working on the task. This includes any remaining features, bugs, points of investigation, and verification items. This list should be exhaustive, so that an agent working with this list can complete the full original task end-to-end. For example:\\n   - Remaining steps from any agreed plan, design doc, or active workflows and instructions, in priority order. Preserve specific uncompleted items rather than collapsing checklists into high-level summaries.\\n   - Remaining files to create, modify, move, copy, or delete, with the key changes needed in each\\n   - Remaining verification steps, test or build commands, or deliverables needed to complete the task\\n   - Any required cleanup, such as removing temporary files, debug code, or temporary configuration changes.\\n   - Known blockers, open questions, prerequisites, or risks for each step\\n\\n7. **Commitments & Constraints**\\n   - Standing rules, personas, or response formatting requirements from user instructions, rules files, or reference documents.\\n   - Promises made to the user (e.g., \\"I said I would do X before Y\\")\\n   - User preferences or style requirements\\n   - Any boundaries the user set on approach, tools, or scope\\n\\nBe concise but complete\\u2014err on the side of including concrete details needed to\\nprevent duplicate work, omitted plan steps, repeated mistakes, or broken promises.\\n\\nWrap your response in <summary></summary> tags.\\n",
+    "use_model_reported_token_count": true
+}`
+          },
+          "allow-experimental-monitors": {
+            boolValue: true
+          },
+          "cascade-include-ephemeral-message": {
+            stringValue: '{\n    "enabled": false,\n    "disabledHeuristics": ["planning_mode", "bash_command_reminder", "running_tasks_reminder"],\n    "staticMessages": [],\n    "useAllowlist": false,\n    "enabledHeuristics": []\n}'
+          },
+          retry_model_capacity_exhausted: {
+            boolValue: true
+          },
+          "task-details-suffix": {
+            stringValue: "\nYOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS: A) either proceed to other relevant work (if any) or, B) simply update the user with a short message (that you have launched the command and will wait for it to finish) and end the turn.\n DO NOTHING ELSE.\n When updating the user, always respond in the language of the user (defaulting to English). Never mix two or more languages in the same response."
+          }
+        }
+      },
+      modelProvider: "MODEL_PROVIDER_GOOGLE",
+      quotaInfo: {
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
+      },
+      recommended: true,
+      supportedMimeTypes: {
+        "application/json": true,
+        "application/msword": true,
+        "application/pdf": true,
+        "application/rtf": true,
+        "application/vnd.ms-excel": true,
+        "application/vnd.ms-powerpoint": true,
+        "application/vnd.oasis.opendocument.presentation": true,
+        "application/vnd.oasis.opendocument.spreadsheet": true,
+        "application/vnd.oasis.opendocument.text": true,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": true,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": true,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
+        "application/x-ipynb+json": true,
+        "application/x-javascript": true,
+        "application/x-python-code": true,
+        "application/x-typescript": true,
+        "audio/aac": true,
+        "audio/amr": true,
+        "audio/flac": true,
+        "audio/l16": true,
+        "audio/m4a": true,
+        "audio/mp3": true,
+        "audio/mp4": true,
+        "audio/mpeg": true,
+        "audio/ogg": true,
+        "audio/opus": true,
+        "audio/vnd.wave": true,
+        "audio/wav": true,
+        "audio/wave": true,
+        "audio/webm": true,
+        "audio/webm;codecs=opus": true,
+        "audio/x-m4a": true,
+        "audio/x-wav": true,
+        "image/heic": true,
+        "image/heif": true,
+        "image/jpeg": true,
+        "image/png": true,
+        "image/webp": true,
+        "text/css": true,
+        "text/csv": true,
+        "text/html": true,
+        "text/javascript": true,
+        "text/markdown": true,
+        "text/plain": true,
+        "text/rtf": true,
+        "text/x-python": true,
+        "text/x-python-script": true,
+        "text/x-typescript": true,
+        "text/xml": true,
+        "video/audio/s16le": true,
+        "video/audio/wav": true,
+        "video/jpeg2000": true,
+        "video/mp4": true,
+        "video/text/timestamp": true,
+        "video/videoframe/jpeg2000": true,
+        "video/webm": true
+      },
+      supportsImages: true,
+      supportsThinking: true,
+      supportsVideo: true,
+      tagTitle: "New",
       thinkingLevel: 2
     },
     "gemini-4-hydrogen-high": {
@@ -4213,8 +4576,8 @@ Never lie in your final answer: never state as fact anything you did not see in 
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -4235,6 +4598,7 @@ Never lie in your final answer: never state as fact anything you did not see in 
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -4435,8 +4799,8 @@ Never lie in your final answer: never state as fact anything you did not see in 
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -4457,6 +4821,7 @@ Never lie in your final answer: never state as fact anything you did not see in 
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -4657,8 +5022,8 @@ Never lie in your final answer: never state as fact anything you did not see in 
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -4679,6 +5044,7 @@ Never lie in your final answer: never state as fact anything you did not see in 
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -4879,8 +5245,8 @@ Never lie in your final answer: never state as fact anything you did not see in 
       },
       modelProvider: "MODEL_PROVIDER_GOOGLE",
       quotaInfo: {
-        remainingFraction: 0.9757339,
-        resetTime: "2026-11-13T11:07:47Z"
+        remainingFraction: 0.9291699,
+        resetTime: "2026-11-13T22:50:40Z"
       },
       recommended: true,
       supportedMimeTypes: {
@@ -4901,6 +5267,7 @@ Never lie in your final answer: never state as fact anything you did not see in 
         "application/x-python-code": true,
         "application/x-typescript": true,
         "audio/aac": true,
+        "audio/amr": true,
         "audio/flac": true,
         "audio/l16": true,
         "audio/m4a": true,
@@ -4961,8 +5328,8 @@ Never lie in your final answer: never state as fact anything you did not see in 
       },
       modelProvider: "MODEL_PROVIDER_OPENAI",
       quotaInfo: {
-        remainingFraction: 0.4823316,
-        resetTime: "2026-11-19T13:17:30Z"
+        remainingFraction: 0.9974441,
+        resetTime: "2026-11-14T01:36:42Z"
       },
       recommended: true,
       supportsThinking: true,
@@ -6589,9 +6956,21 @@ function prepareAgyRequest(input, init, accessToken, projectId, thinkingConfigDe
 }
 var LEGACY_MODEL_ENUM_FALLBACKS = {
   "gemini-3.1-pro-high": "MODEL_PLACEHOLDER_M16",
-  "gemini-pro-agent": "MODEL_PLACEHOLDER_M16"
+  "gemini-pro-agent": "MODEL_PLACEHOLDER_M16",
+  "gemini-pro-orchestrator": "MODEL_PLACEHOLDER_M667",
+  "gemini-pro-orchestrator-argon": "MODEL_PLACEHOLDER_M668"
 };
+var dynamicModelEnums = /* @__PURE__ */ new Map();
+function registerDynamicModelEnum(modelName, modelEnum) {
+  if (modelName && modelEnum) {
+    dynamicModelEnums.set(modelName, modelEnum);
+  }
+}
 function getModelEnum(modelName) {
+  const dynamicEnum = dynamicModelEnums.get(modelName);
+  if (dynamicEnum) {
+    return dynamicEnum;
+  }
   const deprecated = models_default.deprecatedModelIds;
   if (deprecated && deprecated[modelName]) {
     const entry = deprecated[modelName];
@@ -7636,12 +8015,14 @@ var persistAuthClient2 = {
     }
   }
 };
+var ORDERED_TIERS = ["minimal", "low", "medium", "high", "xhigh"];
+var TIER_SUFFIX_REGEX = /^(.+)-(minimal|low|medium|high|xhigh)$/;
+var dynamicModels = /* @__PURE__ */ new Map();
 function resolveModelVariants(modelId) {
-  const mapping = TIER_MAPPING[modelId];
+  const mapping = getEffectiveTierMapping(modelId);
   if (!mapping) return [];
-  const orderedTiers = ["minimal", "low", "medium", "high", "xhigh"];
   const variants = [];
-  for (const tier of orderedTiers) {
+  for (const tier of ORDERED_TIERS) {
     if (mapping[tier] !== void 0) {
       variants.push({
         id: tier,
@@ -7650,6 +8031,90 @@ function resolveModelVariants(modelId) {
     }
   }
   return variants;
+}
+function shouldSkipInternalModel(modelId, entry) {
+  if (!modelId || entry?.disabled === true) return true;
+  if (modelId.startsWith("chat_") || modelId.startsWith("tab_") || modelId.endsWith("-tiered") || modelId.endsWith("-disabled") || modelId.includes("-image") || modelId === "gemini-2.5-flash-thinking") {
+    return true;
+  }
+  return false;
+}
+function ingestAvailableModelsResponse(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload;
+  const modelsMap = record.models && typeof record.models === "object" ? record.models : {};
+  for (const [modelId, entry] of Object.entries(modelsMap)) {
+    if (entry && typeof entry.model === "string") {
+      registerDynamicModelEnum(modelId, entry.model);
+    }
+  }
+  const candidateIds = /* @__PURE__ */ new Set();
+  if (Array.isArray(record.agentModelSorts)) {
+    for (const sort of record.agentModelSorts) {
+      for (const group of sort?.groups ?? []) {
+        for (const id of group?.modelIds ?? []) {
+          if (typeof id === "string") candidateIds.add(id);
+        }
+      }
+    }
+  }
+  for (const id of Object.keys(modelsMap)) {
+    candidateIds.add(id);
+  }
+  const tierSiblingCounts = /* @__PURE__ */ new Map();
+  for (const id of candidateIds) {
+    const entry = modelsMap[id];
+    if (shouldSkipInternalModel(id, entry)) continue;
+    const match = id.match(TIER_SUFFIX_REGEX);
+    if (match?.[1] && !STATIC_MODELS_SIMPLE[id]) {
+      tierSiblingCounts.set(match[1], (tierSiblingCounts.get(match[1]) ?? 0) + 1);
+    }
+  }
+  let changed = false;
+  for (const id of candidateIds) {
+    const entry = modelsMap[id];
+    if (shouldSkipInternalModel(id, entry)) continue;
+    if (STATIC_MODELS_SIMPLE[id]) {
+      continue;
+    }
+    const match = id.match(TIER_SUFFIX_REGEX);
+    const baseId = match?.[1];
+    const tier = match?.[2];
+    const isGroupedTieredModel = Boolean(baseId && tier) && (Boolean(baseId && (STATIC_MODELS_SIMPLE[baseId] || TIER_MAPPING[baseId])) || (baseId ? (tierSiblingCounts.get(baseId) ?? 0) >= 2 : false));
+    if (isGroupedTieredModel && baseId && tier) {
+      if (registerDynamicTierVariant(baseId, tier, id)) {
+        changed = true;
+      }
+      if (!STATIC_MODELS_SIMPLE[baseId] && !dynamicModels.has(baseId)) {
+        const cleanName = (entry?.displayName || baseId).replace(/\s*\((Minimal|Low|Medium|High|XHigh)\)\s*$/i, "").trim();
+        dynamicModels.set(baseId, {
+          name: cleanName || baseId,
+          description: `${cleanName || baseId} model. Select tier at runtime.`,
+          maxTokens: typeof entry?.maxTokens === "number" ? entry.maxTokens : 1048576,
+          maxOutputTokens: typeof entry?.maxOutputTokens === "number" ? entry.maxOutputTokens : 65536,
+          toolCall: true,
+          reasoning: entry?.supportsThinking ?? true,
+          attachment: entry?.supportsImages ?? !baseId.startsWith("gpt-")
+        });
+        changed = true;
+      }
+      continue;
+    }
+    if (!dynamicModels.has(id)) {
+      const displayName = entry?.displayName?.trim() || id;
+      dynamicModels.set(id, {
+        name: displayName,
+        description: `${displayName} model via Antigravity CLI.`,
+        maxTokens: typeof entry?.maxTokens === "number" ? entry.maxTokens : 1048576,
+        maxOutputTokens: typeof entry?.maxOutputTokens === "number" ? entry.maxOutputTokens : 65536,
+        toolCall: true,
+        reasoning: entry?.supportsThinking ?? true,
+        attachment: entry?.supportsImages ?? !id.startsWith("gpt-")
+      });
+      changed = true;
+    }
+  }
+  return changed;
 }
 function resolveModelFamily(modelId) {
   if (modelId.startsWith("claude-")) return "claude";
@@ -7785,6 +8250,7 @@ async function setupOpenCodeV2(ctx) {
               saveStoredAuthToJson(authRecord);
             } catch {
             }
+            void syncAvailableModels(authRecord);
             return {
               type: "oauth",
               methodID: OAUTH_METHOD_ID,
@@ -7835,9 +8301,51 @@ async function setupOpenCodeV2(ctx) {
         applyModelInfo(model, modelId, simple);
       });
     }
+    for (const [modelId, simple] of dynamicModels.entries()) {
+      editor.models.update(AGY_PROVIDER_ID, modelId, (model) => {
+        applyModelInfo(model, modelId, simple);
+      });
+    }
   });
   await registerV2SessionHooks(ctx, { getConfiguredProjectId });
+  let disposed = false;
+  async function syncAvailableModels(authOverride) {
+    if (disposed || typeof ctx.provider.reload !== "function") {
+      return;
+    }
+    try {
+      let auth = authOverride ?? await resolveActiveOAuthCredential(ctx.integration);
+      if (!auth?.refresh) return;
+      if (!auth.access || accessTokenExpired(auth)) {
+        const refreshed = await refreshAccessToken(auth, persistAuthClient2);
+        if (!refreshed) return;
+        auth = refreshed;
+      }
+      const parts = parseRefreshParts(auth.refresh);
+      const project = getConfiguredProjectId() || parts.managedProjectId || parts.projectId;
+      if (!project) return;
+      const resp = await agyFetch(`${AGY_CODE_ASSIST_ENDPOINT}/v1internal:fetchAvailableModels`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.access}`,
+          "User-Agent": buildAgyCliUserAgent(),
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ project })
+      });
+      if (!resp.ok || disposed) return;
+      const payload = await resp.json();
+      if (disposed) return;
+      const addedNewModelsOrVariants = ingestAvailableModelsResponse(payload);
+      if (addedNewModelsOrVariants && !disposed) {
+        await ctx.provider.reload();
+      }
+    } catch {
+    }
+  }
+  void syncAvailableModels();
   return () => {
+    disposed = true;
     getDiskSignatureCache()?.shutdown();
     shutdownTurnStateTracker();
     shutdownRetryCooldowns();

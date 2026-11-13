@@ -5,12 +5,16 @@ import {
   STATIC_MODELS_SIMPLE,
   createV2PluginDefinition,
   getDiskSignatureCache,
+  ingestAvailableModelsResponse,
   resetDiskSignatureCacheForTesting,
+  resetDynamicModelsForTesting,
+  resolveModelTier,
   resolveModelVariants,
   setStoredAuthOverrideForTesting,
   setupOpenCodeV2,
   v2PluginDefinition,
 } from "../../src/plugin/v2";
+import { getModelEnum } from "../../src/sdk/request/prepare";
 import type {
   OpenCodeV2IntegrationEditor,
   OpenCodeV2IntegrationMethodRegistration,
@@ -23,6 +27,7 @@ import type {
 describe("OpenCode v2 Plugin Setup", () => {
   afterEach(() => {
     setStoredAuthOverrideForTesting(undefined);
+    resetDynamicModelsForTesting();
     vi.restoreAllMocks();
   });
 
@@ -105,6 +110,13 @@ describe("OpenCode v2 Plugin Setup", () => {
       expect(m.variants).toEqual(resolveModelVariants(modelId));
     }
 
+    expect(models[`${AGY_PROVIDER_ID}/gemini-4-carbon`].variants).toEqual([
+      { id: "low", headers: { "x-agy-tier": "low" } },
+      { id: "medium", headers: { "x-agy-tier": "medium" } },
+      { id: "high", headers: { "x-agy-tier": "high" } },
+    ]);
+    expect(models[`${AGY_PROVIDER_ID}/gemini-pro-orchestrator`].name).toBe("Orchestrator (Carbon)");
+    expect(models[`${AGY_PROVIDER_ID}/gemini-pro-orchestrator-argon`].name).toBe("Orchestrator (Argon)");
     expect(models[`${AGY_PROVIDER_ID}/gemini-4-hydrogen`].variants).toEqual([
       { id: "low", headers: { "x-agy-tier": "low" } },
       { id: "medium", headers: { "x-agy-tier": "medium" } },
@@ -113,6 +125,55 @@ describe("OpenCode v2 Plugin Setup", () => {
     ]);
     expect(models[`${AGY_PROVIDER_ID}/claude-sonnet-5-5`].family).toBe("claude");
     expect(models[`${AGY_PROVIDER_ID}/gpt-oss-120b-medium`].family).toBe("gpt");
+
+    // Verify dynamic model discovery from :fetchAvailableModels
+    const changed = ingestAvailableModelsResponse({
+      agentModelSorts: [
+        {
+          groups: [
+            {
+              modelIds: [
+                "gemini-4-oxygen-low",
+                "gemini-4-oxygen-high",
+                "gemini-pro-specialist",
+              ],
+            },
+          ],
+        },
+      ],
+      models: {
+        "gemini-4-oxygen-low": {
+          displayName: "Gemini 4 Oxygen (Low)",
+          maxTokens: 1048576,
+          maxOutputTokens: 262144,
+          model: "MODEL_PLACEHOLDER_M901",
+          supportsImages: true,
+          supportsThinking: true,
+        },
+        "gemini-4-oxygen-high": {
+          displayName: "Gemini 4 Oxygen (High)",
+          maxTokens: 1048576,
+          maxOutputTokens: 262144,
+          model: "MODEL_PLACEHOLDER_M902",
+          supportsImages: true,
+          supportsThinking: true,
+        },
+        "gemini-pro-specialist": {
+          displayName: "Gemini Pro Specialist",
+          maxTokens: 1048576,
+          maxOutputTokens: 131072,
+          model: "MODEL_PLACEHOLDER_M903",
+          supportsImages: true,
+          supportsThinking: true,
+        },
+      },
+    });
+    expect(changed).toBe(true);
+    expect(resolveModelTier("gemini-4-oxygen", { headers: { "x-agy-tier": "high" } })).toBe(
+      "gemini-4-oxygen-high",
+    );
+    expect(getModelEnum("gemini-4-oxygen-high")).toBe("MODEL_PLACEHOLDER_M902");
+    expect(getModelEnum("gemini-pro-specialist")).toBe("MODEL_PLACEHOLDER_M903");
 
     await cleanup();
   });
