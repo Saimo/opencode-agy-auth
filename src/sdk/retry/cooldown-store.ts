@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
+import { getAgyCacheDir } from "../cache-dir";
 
 interface CooldownData {
   version: "1.0";
@@ -10,17 +11,8 @@ interface CooldownData {
 
 const WRITE_THROTTLE_MS = 5000;
 
-function getConfigDir(): string {
-  const platform = process.platform;
-  if (platform === "win32") {
-    return join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "opencode");
-  }
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(xdgConfig, "opencode");
-}
-
 function getCooldownFilePath(): string {
-  return join(getConfigDir(), "antigravity-retry-cooldowns.json");
+  return join(getAgyCacheDir(), "antigravity-retry-cooldowns.json");
 }
 
 export function loadCooldowns(): Map<string, number> {

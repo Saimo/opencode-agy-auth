@@ -100,14 +100,9 @@ describe('oauth-authorize', () => {
     expect(mismatchResult.type).toBe('failed');
   });
 
-  it('handles headless/SSH environment and toast warning on context failure', async () => {
+  it('handles headless/SSH environment and degrades gracefully on project context failure', async () => {
     const origSsh = process.env.SSH_CONNECTION;
     process.env.SSH_CONNECTION = '1';
-
-    const toastFn = vi.fn().mockResolvedValue(undefined);
-    const client = {
-      tui: { showToast: toastFn },
-    };
 
     vi.spyOn(oauthSdk, 'authorizeAgy').mockResolvedValue({
       url: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=123',
@@ -127,7 +122,6 @@ describe('oauth-authorize', () => {
     );
 
     const authorize = createOAuthAuthorizeMethod({
-      client: client as any,
       getConfiguredProjectId: () => 'proj-cfg',
       getUserAgentModel: () => 'gemini-3.7-flash',
     });
@@ -135,10 +129,8 @@ describe('oauth-authorize', () => {
     const result = await authorize();
     expect(result.instructions).toContain('Headless/SSH environment detected');
 
-    // Parse query params formatted callback
     const res = await result.callback('?code=code-123&state=state-ssh');
     expect(res.type).toBe('success');
-    expect(toastFn).toHaveBeenCalled();
 
     if (origSsh === undefined) {
       delete process.env.SSH_CONNECTION;

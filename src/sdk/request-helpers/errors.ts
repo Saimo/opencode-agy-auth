@@ -8,7 +8,6 @@ import {
   type GoogleRpcQuotaFailure,
   type GoogleRpcRetryInfo,
 } from "./types";
-import { formatHyperlink } from '../terminal-hyperlink';
 
 /**
  * Enhances 404 errors for Gemini 3 models with direct preview access information.
@@ -27,7 +26,7 @@ export function rewriteGeminiPreviewAccessError(
   const messagePrefix = trimmedMessage.length > 0
     ? trimmedMessage
     : "Gemini 3 preview features are not enabled for this account.";
-  const enhancedMessage = `${messagePrefix} Request preview access at ${formatHyperlink(GEMINI_PREVIEW_LINK, 'preview access page')} before using Gemini 3 models.`;
+  const enhancedMessage = `${messagePrefix} Request preview access at ${GEMINI_PREVIEW_LINK} before using Gemini 3 models.`;
 
   return {
     ...body,
@@ -58,8 +57,8 @@ export function enhanceGeminiErrorResponse(
     if (validationInfo) {
       const message = [
         error.message ?? "Account validation required for Gemini/Agy Code Assist.",
-        validationInfo.link ? `Complete validation: ${formatHyperlink(validationInfo.link, 'validation page')}` : undefined,
-        validationInfo.learnMore ? `Learn more: ${formatHyperlink(validationInfo.learnMore, 'help article')}` : undefined,
+        validationInfo.link ? `Complete validation: ${validationInfo.link}` : undefined,
+        validationInfo.learnMore ? `Learn more: ${validationInfo.learnMore}` : undefined,
       ]
         .filter(Boolean)
         .join(" ");

@@ -1,5 +1,4 @@
-import { generatePKCE } from '@openauthjs/openauth/pkce';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import { AGY_CLIENT_ID, AGY_CLIENT_SECRET, AGY_REDIRECT_URI, AGY_SCOPES } from '../constants';
 import { agyFetch } from '../fetch';
@@ -40,11 +39,17 @@ interface AgyUserInfo {
   email?: string;
 }
 
+function generatePkcePair(): PkcePair {
+  const verifier = randomBytes(32).toString('base64url');
+  const challenge = createHash('sha256').update(verifier).digest('base64url');
+  return { verifier, challenge };
+}
+
 /**
- * Builds the Agy OAuth authorization URL with PKCE.
+ * Builds the Agy OAuth authorization URL with PKCE (RFC 7636 S256).
  */
 export async function authorizeAgy(): Promise<AgyAuthorization> {
-  const pkce = (await generatePKCE()) as PkcePair;
+  const pkce = generatePkcePair();
   const state = randomBytes(32).toString('hex');
 
   const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
@@ -120,7 +125,7 @@ async function exchangeAgyWithVerifierInternal(code: string, verifier: string): 
     type: 'success',
     refresh: refreshToken,
     access: tokenPayload.access_token,
-    expires: Date.now() + tokenPayload.expires_in * 1000,
+    expires: Math.max(0, Math.floor(Date.now() + tokenPayload.expires_in * 1000)),
     email: userInfo.email
   };
 }

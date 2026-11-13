@@ -1,4 +1,3 @@
-
 import {
   enhanceGeminiErrorResponse,
   extractUsageMetadata,
@@ -9,8 +8,7 @@ import {
 import { injectResponseIdFromTrace } from "./shared";
 import { cacheSignature } from "../../plugin/cache";
 import { createStreamingTransformer, defaultSignatureStore } from "./thinking";
-import { getTurnStateTracker, type TurnState } from "./turn-state-tracker";
-import type { ChatLogger } from "../chat-logger";
+import { getTurnStateTracker } from "./turn-state-tracker";
 import { getToolMapper, restoreToolNamesInResponse } from "./tool-mapper";
 
 /**
@@ -19,32 +17,23 @@ import { getToolMapper, restoreToolNamesInResponse } from "./tool-mapper";
 export async function transformAgyResponse(
   response: Response,
   streaming: boolean,
-  _ignoredDebugContext?: any,
+  _ignoredDebugContext?: unknown,
   requestedModel?: string,
   sessionId?: string,
-  chatLogger?: ChatLogger | null,
 ): Promise<Response> {
   const contentType = response.headers.get("content-type") ?? "";
   const isJsonResponse = contentType.includes("application/json");
   const isEventStreamResponse = contentType.includes("text/event-stream");
 
   if (!isJsonResponse && !isEventStreamResponse) {
-    if (chatLogger) {
-      chatLogger.logResponseHeaders(response.status, response.statusText, response.headers);
-      chatLogger.logResponseBody("[Non-JSON response (body omitted)]");
-      chatLogger.close();
-    }
     return response;
   }
 
   try {
     const headers = new Headers(response.headers);
-    if (chatLogger) {
-      chatLogger.logResponseHeaders(response.status, response.statusText, headers);
-    }
 
     if (streaming && response.ok && isEventStreamResponse && response.body) {
-      return new Response(transformStreamingPayloadStream(response.body, sessionId, chatLogger), {
+      return new Response(transformStreamingPayloadStream(response.body, sessionId), {
         status: response.status,
         statusText: response.statusText,
         headers,
@@ -52,11 +41,6 @@ export async function transformAgyResponse(
     }
 
     const text = await response.text();
-    if (chatLogger) {
-      chatLogger.logResponseBody(text);
-      chatLogger.close();
-    }
-
     const init = {
       status: response.status,
       statusText: response.statusText,
@@ -131,7 +115,6 @@ function attachUsageHeaders(headers: Headers, effectiveBody: unknown): void {
 function transformStreamingPayloadStream(
   stream: ReadableStream<Uint8Array>,
   sessionId?: string,
-  chatLogger?: ChatLogger | null,
 ): ReadableStream<Uint8Array> {
   const callbacks = {
     onCacheSignature: (sessionKey: string, text: string, signature: string) => {
@@ -166,12 +149,6 @@ function transformStreamingPayloadStream(
       cacheSignatures: !!sessionId,
     },
   );
-
-  if (chatLogger) {
-    return stream
-      .pipeThrough(chatLogger.createLoggingTransformStream())
-      .pipeThrough(transformer);
-  }
 
   return stream.pipeThrough(transformer);
 }

@@ -31,7 +31,10 @@ function resolveConfiguredProjectIdFromProvider(
   if (!provider || typeof provider !== "object") {
     return undefined;
   }
-  return normalizeProjectId(provider.options?.projectId);
+  return (
+    normalizeProjectId(provider.settings?.projectId) ??
+    normalizeProjectId(provider.options?.projectId)
+  );
 }
 
 export function resolveConfiguredProjectIdFromConfig(
@@ -42,7 +45,10 @@ export function resolveConfiguredProjectIdFromConfig(
   }
 
   const providerConfig = config.provider[AGY_PROVIDER_ID];
-  return normalizeProjectId(providerConfig?.options?.projectId);
+  return (
+    normalizeProjectId(providerConfig?.settings?.projectId) ??
+    normalizeProjectId(providerConfig?.options?.projectId)
+  );
 }
 
 export async function resolveConfiguredProjectIdFromClient(

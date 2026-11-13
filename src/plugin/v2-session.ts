@@ -1,381 +1,382 @@
-import { AGY_PROVIDER_ID } from '../constants';
-import { buildAgyCliUserAgent } from '../sdk/user-agent';
+import { AGY_PROVIDER_ID } from "../constants";
+import { buildAgyCliUserAgent } from "../sdk/user-agent";
 import {
   isGenerativeLanguageRequest,
   parseGenerativeLanguageRequest,
   prepareAgyRequest,
-  transformAgyResponse
-} from '../sdk/request';
-import { classifyQuotaResponse, retryInternals } from '../sdk/retry/quota';
-import {
-  getExponentialDelayWithJitter,
-  isRetryableNetworkError,
-  isRetryableStatus,
-  resolveRetryDelayMs
-} from '../sdk/retry/helpers';
-import { resolveCachedAuth } from './cache';
-import { accessTokenExpired, isOAuthAuth, parseRefreshParts } from './auth';
-import { refreshAccessToken } from './token';
-import { ensureProjectContext } from './project';
-import { loadStoredAuthFromJson, saveStoredAuthToJson } from './v2-storage';
-import { toUrlString } from './headers';
-import { resolveModelTier } from './tier';
+  transformAgyResponse,
+} from "../sdk/request";
+import { classifyQuotaResponse, parseRetryDelayFromBody } from "../sdk/retry/quota";
+import { getExponentialDelayWithJitter, isRetryableNetworkError, isRetryableStatus } from "../sdk/retry/helpers";
+import { resolveCachedAuth } from "./cache";
+import { accessTokenExpired, isOAuthAuth, parseRefreshParts } from "./auth";
+import { refreshAccessToken } from "./token";
+import { ensureProjectContext } from "./project";
+import { resolveConfiguredProjectId } from "./provider";
+import { loadStoredAuthFromJson, saveStoredAuthToJson } from "./v2-storage";
+import { toUrlString } from "./headers";
+import { resolveModelTier } from "./tier";
+import type {
+  OAuthAuthDetails,
+  OpenCodeV2IntegrationDomain,
+  OpenCodeV2PluginContext,
+  OpenCodeV2SessionHttpRequest,
+  OpenCodeV2SessionHttpResponse,
+  OpenCodeV2SessionRetry,
+  PluginClient,
+} from "./types";
 
-export interface V2SessionHooksState {
-  lastInterceptedModel?: string;
-  lastSessionId?: string;
+interface TrackedRequestMeta {
+  requestedModel?: string;
+  sessionID?: string;
+  streaming: boolean;
 }
 
-export function createV2HttpRequestHook(state: V2SessionHooksState = {}) {
-  return async (event: any) => {
-    if (!event) return;
+export interface V2SessionHookOptions {
+  integration?: OpenCodeV2IntegrationDomain;
+  getConfiguredProjectId?: () => string | undefined;
+}
 
-    const rawUrl = typeof event.url === 'string' ? event.url : (event.request?.url || '');
+const persistAuthClient: PluginClient = {
+  auth: {
+    async set({ body }) {
+      try {
+        saveStoredAuthToJson(body);
+      } catch {
+        // Ignore best-effort auth.json sync failures
+      }
+    },
+  },
+};
+
+function stripSensitiveAndInternalHeaders(headers: Headers): void {
+  for (const key of Array.from(headers.keys())) {
+    const lower = key.toLowerCase();
+    if (
+      lower === "x-api-key" ||
+      lower === "api-key" ||
+      lower === "x-goog-api-key" ||
+      lower === "x-agy-tier" ||
+      lower === "x-session-affinity" ||
+      lower === "x-session-id" ||
+      lower === "x-parent-session-id" ||
+      lower.startsWith("x-opencode-")
+    ) {
+      headers.delete(key);
+    }
+  }
+}
+
+function stripUrlApiKeys(rawUrl: string): string {
+  try {
+    const parsedUrl = new URL(rawUrl);
+    let changed = false;
+    for (const param of ["key", "x-goog-api-key", "api-key"]) {
+      if (parsedUrl.searchParams.has(param)) {
+        parsedUrl.searchParams.delete(param);
+        changed = true;
+      }
+    }
+    return changed ? parsedUrl.toString() : rawUrl;
+  } catch {
+    return rawUrl;
+  }
+}
+
+async function resolveActiveOAuthCredential(
+  integration?: OpenCodeV2IntegrationDomain,
+): Promise<OAuthAuthDetails | undefined> {
+  const connApi = integration?.connection;
+  if (typeof connApi?.active === "function" && typeof connApi?.resolve === "function") {
+    try {
+      const connection = await connApi.active(AGY_PROVIDER_ID);
+      if (connection) {
+        const resolved = await connApi.resolve(connection);
+        if (resolved && typeof resolved === "object") {
+          // OpenCode v2 `connection.resolve` returns Credential.Value directly (`{ type: "oauth", access, refresh, expires, ... }`)
+          const candidate =
+            resolved.type === "oauth"
+              ? resolved
+              : (resolved as { credential?: unknown }).credential;
+          if (
+            candidate &&
+            typeof candidate === "object" &&
+            (candidate as { type?: string }).type === "oauth" &&
+            typeof (candidate as { access?: unknown }).access === "string" &&
+            typeof (candidate as { refresh?: unknown }).refresh === "string"
+          ) {
+            const oauth = candidate as {
+              access: string;
+              refresh: string;
+              expires?: number;
+              metadata?: Record<string, unknown>;
+            };
+            return {
+              type: "oauth",
+              access: oauth.access,
+              refresh: oauth.refresh,
+              expires: typeof oauth.expires === "number" ? oauth.expires : Date.now() + 3600_000,
+              metadata: oauth.metadata,
+            };
+          }
+        }
+      }
+    } catch {
+      // Fall through to auth.json fallback
+    }
+  }
+
+  const stored = loadStoredAuthFromJson();
+  if (stored && isOAuthAuth(stored)) {
+    return stored;
+  }
+  return undefined;
+}
+
+export function createV2HttpRequestHook(
+  trackedRequests: WeakMap<Request, TrackedRequestMeta> = new WeakMap(),
+  options: V2SessionHookOptions = {},
+) {
+  return async (event: OpenCodeV2SessionHttpRequest) => {
+    if (!event?.request) return;
+
+    const rawUrl = event.request.url || "";
     const isGL = isGenerativeLanguageRequest(rawUrl);
-    const isInternal = rawUrl.includes('cloudcode-pa.googleapis.com');
+    const isInternal = rawUrl.includes("cloudcode-pa.googleapis.com");
 
     if (!isGL && !isInternal) {
       return;
     }
 
-    event.headers = event.headers || {};
-    let modelName: string | undefined;
-
-    // Load auth record
-    let rawAuth = event.auth;
-    if (rawAuth && !rawAuth.type) {
-      const tokenVal = rawAuth.access || rawAuth.token;
-      if (tokenVal || rawAuth.refresh) {
-        rawAuth = { type: 'oauth', access: tokenVal, ...rawAuth };
-      }
-    }
-    if (!rawAuth || !isOAuthAuth(rawAuth)) {
-      rawAuth = loadStoredAuthFromJson();
-    }
-
-    let authRecord = rawAuth && isOAuthAuth(rawAuth) ? resolveCachedAuth(rawAuth) : undefined;
-    if (authRecord && accessTokenExpired(authRecord)) {
-      const refreshed = await refreshAccessToken(authRecord, { auth: { set: async () => {} } } as any);
-      if (refreshed) {
-        authRecord = refreshed;
-        try {
-          saveStoredAuthToJson(refreshed);
-        } catch {
-          console.warn('[Agy Auth] Refreshed credentials could not be persisted; the current request will continue.');
-        }
-      }
-    }
-
-    if (isGL) {
-      const parsed = parseGenerativeLanguageRequest(rawUrl);
-      modelName = parsed?.effectiveModel;
-      if (modelName) {
-        state.lastInterceptedModel = modelName;
-      }
-
-      // Strip x-goog-api-key and api-key from headers
-      if (typeof event.headers.delete === 'function') {
-        event.headers.delete('x-goog-api-key');
-        event.headers.delete('api-key');
-      } else {
-        for (const key of Object.keys(event.headers)) {
-          const lower = key.toLowerCase();
-          if (lower === 'x-goog-api-key' || lower === 'api-key') {
-            delete event.headers[key];
-          }
-        }
-      }
-
-      if (event.request?.headers) {
-        if (typeof event.request.headers.delete === 'function') {
-          event.request.headers.delete('x-goog-api-key');
-          event.request.headers.delete('api-key');
-        } else {
-          for (const key of Object.keys(event.request.headers)) {
-            const lower = key.toLowerCase();
-            if (lower === 'x-goog-api-key' || lower === 'api-key') {
-              delete event.request.headers[key];
-            }
-          }
-        }
-      }
-
-      // Strip query parameter key/x-goog-api-key/api-key if URL has them
-      let cleanUrl = rawUrl;
-      try {
-        const parsedUrl = new URL(rawUrl);
-        let urlChanged = false;
-        for (const param of ['key', 'x-goog-api-key', 'api-key']) {
-          if (parsedUrl.searchParams.has(param)) {
-            parsedUrl.searchParams.delete(param);
-            urlChanged = true;
-          }
-        }
-        if (urlChanged) {
-          cleanUrl = parsedUrl.toString();
-        }
-      } catch {
-        // Ignore invalid URL parse
-      }
-
-      // Read body from event.body or event.request early to extract sessionId
-      let bodyPayload: any = event.body;
-      if (bodyPayload === undefined && event.request) {
-        if (typeof event.request.clone === 'function') {
+    let authRecord = await resolveActiveOAuthCredential(options.integration);
+    if (authRecord) {
+      authRecord = resolveCachedAuth(authRecord);
+      if (accessTokenExpired(authRecord)) {
+        const refreshed = await refreshAccessToken(authRecord, persistAuthClient);
+        if (refreshed) {
+          authRecord = refreshed;
           try {
-            bodyPayload = await event.request.clone().text();
+            saveStoredAuthToJson(refreshed);
           } catch {
-            // Ignore clone read error
-          }
-        } else if (event.request.body !== undefined) {
-          bodyPayload = event.request.body;
-        }
-      }
-
-      if (bodyPayload) {
-        try {
-          const parsed = typeof bodyPayload === 'string' ? JSON.parse(bodyPayload) : bodyPayload;
-          if (parsed && typeof parsed === 'object' && typeof parsed.sessionId === 'string') {
-            state.lastSessionId = parsed.sessionId;
-          }
-        } catch {
-          // Ignore json parse error
-        }
-      }
-
-      // If we have auth, perform full URL and body transformation via prepareAgyRequest
-      if (authRecord && authRecord.access) {
-        let projectContext: { effectiveProjectId: string; auth: any };
-        try {
-          projectContext = await ensureProjectContext(
-            authRecord,
-            { auth: { set: async () => {} } } as any,
-            undefined,
-            modelName
-          );
-        } catch {
-          projectContext = {
-            effectiveProjectId: parseRefreshParts(authRecord.refresh).projectId || 'antigravity',
-            auth: authRecord
-          };
-        }
-
-        const originalRequestedModel = modelName;
-        let modifiedUrl = cleanUrl;
-        if (originalRequestedModel) {
-          const originalBase = originalRequestedModel.replace('google-agy/', '');
-          const initHeaders = event.headers instanceof Headers ? event.headers : event.request?.headers;
-          const resolvedBase = resolveModelTier(originalBase, { headers: initHeaders });
-          if (originalBase !== resolvedBase) {
-            modifiedUrl = modifiedUrl.replace(`models/${originalBase}`, `models/${resolvedBase}`);
-          }
-        }
-
-        // Check if caller supplied custom user-agent
-        let preExistingUserAgent: string | undefined;
-        if (typeof event.headers?.get === 'function') {
-          preExistingUserAgent = event.headers.get('user-agent') || event.headers.get('User-Agent') || undefined;
-        } else if (event.headers && typeof event.headers === 'object') {
-          preExistingUserAgent = (event.headers['user-agent'] as string) || (event.headers['User-Agent'] as string) || undefined;
-        }
-        if (!preExistingUserAgent && typeof event.request?.headers?.get === 'function') {
-          preExistingUserAgent = event.request.headers.get('user-agent') || event.request.headers.get('User-Agent') || undefined;
-        } else if (!preExistingUserAgent && event.request?.headers && typeof event.request.headers === 'object') {
-          preExistingUserAgent = (event.request.headers['user-agent'] as string) || (event.request.headers['User-Agent'] as string) || undefined;
-        }
-
-        const method = event.method || event.request?.method || 'POST';
-        const requestHeaders = event.headers || event.request?.headers;
-        const transformed = prepareAgyRequest(
-          modifiedUrl,
-          {
-            method,
-            headers: requestHeaders,
-            body: bodyPayload
-          },
-          authRecord.access,
-          projectContext.effectiveProjectId
-        );
-
-        if (transformed.sessionId) {
-          state.lastSessionId = transformed.sessionId;
-        }
-
-        // Update URL to Code Assist endpoint
-        const targetUrl = toUrlString(transformed.request);
-        if (typeof event.url === 'string') {
-          event.url = targetUrl;
-        }
-        if (event.request && typeof event.request === 'object') {
-          if (typeof Request !== 'undefined' && event.request instanceof Request) {
-            event.request = new Request(targetUrl, {
-              method: transformed.init.method,
-              headers: transformed.init.headers,
-              body: transformed.init.body
-            });
-          } else if (typeof event.request.url === 'string') {
-            try {
-              event.request.url = targetUrl;
-            } catch {
-              // Ignore setter error on read-only url property
-            }
-          }
-        }
-
-        // Update headers
-        const headerEntries = transformed.init.headers instanceof Headers
-          ? Array.from(transformed.init.headers.entries())
-          : Object.entries(transformed.init.headers || {});
-
-        for (const [k, v] of headerEntries) {
-          const lowerK = k.toLowerCase();
-          if (lowerK === 'user-agent') {
-            if (preExistingUserAgent) {
-              continue;
-            }
-            // If no pre-existing user-agent, set as 'User-Agent' on plain objects
-            if (typeof event.headers?.set === 'function') {
-              event.headers.set('User-Agent', v);
-            } else if (event.headers) {
-              event.headers['User-Agent'] = v;
-            }
-            if (event.request?.headers && typeof event.request.headers.set === 'function') {
-              event.request.headers.set('User-Agent', v);
-            } else if (event.request?.headers && typeof event.request.headers === 'object') {
-              event.request.headers['User-Agent'] = v;
-            }
-            continue;
-          }
-          if (typeof event.headers?.set === 'function') {
-            event.headers.set(k, v);
-          } else if (event.headers) {
-            event.headers[k] = v;
-          }
-          if (event.request?.headers && typeof event.request.headers.set === 'function') {
-            event.request.headers.set(k, v);
-          } else if (event.request?.headers && typeof event.request.headers === 'object') {
-            event.request.headers[k] = v;
-          }
-        }
-
-        // Update body
-        if (transformed.init.body !== undefined) {
-          event.body = transformed.init.body;
-          if (event.request && typeof event.request === 'object' && !(event.request instanceof Request)) {
-            event.request.body = transformed.init.body;
-          }
-        }
-      } else {
-        // Fallback if no auth: update cleaned URL
-        if (typeof event.url === 'string') {
-          event.url = cleanUrl;
-        }
-        if (event.request && typeof event.request === 'object') {
-          if (typeof Request !== 'undefined' && event.request instanceof Request) {
-            event.request = new Request(cleanUrl, event.request);
-          } else if (typeof event.request.url === 'string') {
-            try {
-              event.request.url = cleanUrl;
-            } catch {
-              // Ignore setter error on read-only url property
-            }
+            // Best-effort sync
           }
         }
       }
     }
 
-    if (authRecord && authRecord.access) {
-      if (typeof event.headers?.set === 'function') {
-        event.headers.set('Authorization', `Bearer ${authRecord.access}`);
-      } else if (event.headers) {
-        event.headers['Authorization'] = `Bearer ${authRecord.access}`;
+    if (isInternal && !isGL) {
+      const headers = new Headers(event.request.headers);
+      stripSensitiveAndInternalHeaders(headers);
+      if (authRecord?.access && !headers.has("authorization")) {
+        headers.set("Authorization", `Bearer ${authRecord.access}`);
       }
-      if (event.request?.headers && typeof event.request.headers.set === 'function') {
-        event.request.headers.set('Authorization', `Bearer ${authRecord.access}`);
-      } else if (event.request?.headers && typeof event.request.headers === 'object') {
-        event.request.headers['Authorization'] = `Bearer ${authRecord.access}`;
-      }
+      headers.set("User-Agent", buildAgyCliUserAgent(event.model?.id));
+
+      const nextRequest = new Request(rawUrl, {
+        method: event.request.method || "POST",
+        headers,
+        body: event.request.body ? await event.request.clone().arrayBuffer() : undefined,
+      });
+      trackedRequests.set(nextRequest, {
+        requestedModel: event.model?.id,
+        sessionID: event.sessionID,
+        streaming: rawUrl.includes(":streamGenerateContent"),
+      });
+      event.request = nextRequest;
+      return;
     }
 
-    const userAgent = buildAgyCliUserAgent(modelName);
-    if (typeof event.headers?.set === 'function') {
-      if (!event.headers.get('User-Agent') && !event.headers.get('user-agent')) {
-        event.headers.set('User-Agent', userAgent);
-      }
-    } else if (event.headers) {
-      if (!event.headers['User-Agent'] && !event.headers['user-agent']) {
-        event.headers['User-Agent'] = userAgent;
-      }
+    const cleanUrl = stripUrlApiKeys(rawUrl);
+    const parsedTarget = parseGenerativeLanguageRequest(cleanUrl);
+    const baseModel = (parsedTarget?.effectiveModel ?? event.model?.id ?? "").replace(/^google-agy\//, "");
+
+    // Merge variant tier from OpenCode v2's `event.model.variant` with any `x-agy-tier` header
+    const tierHeaders = new Headers(event.request.headers);
+    if (event.model?.variant && !tierHeaders.has("x-agy-tier")) {
+      tierHeaders.set("x-agy-tier", event.model.variant);
     }
-    if (event.request?.headers && typeof event.request.headers.set === 'function') {
-      if (!event.request.headers.get('User-Agent') && !event.request.headers.get('user-agent')) {
-        event.request.headers.set('User-Agent', userAgent);
-      }
-    } else if (event.request?.headers && typeof event.request.headers === 'object') {
-      if (!event.request.headers['User-Agent'] && !event.request.headers['user-agent']) {
-        event.request.headers['User-Agent'] = userAgent;
-      }
+    const resolvedModel = baseModel ? resolveModelTier(baseModel, { headers: tierHeaders }) : baseModel;
+    const modifiedUrl =
+      baseModel && resolvedModel && baseModel !== resolvedModel
+        ? cleanUrl.replace(`models/${baseModel}`, `models/${resolvedModel}`)
+        : cleanUrl;
+
+    if (!authRecord?.access) {
+      const headers = new Headers(event.request.headers);
+      stripSensitiveAndInternalHeaders(headers);
+      headers.set("User-Agent", buildAgyCliUserAgent(resolvedModel || undefined));
+      event.request = new Request(cleanUrl, {
+        method: event.request.method || "POST",
+        headers,
+        body: event.request.body ? await event.request.clone().arrayBuffer() : undefined,
+      });
+      return;
     }
+
+    const configuredProjectId = resolveConfiguredProjectId({
+      configProjectId: options.getConfiguredProjectId?.(),
+    });
+
+    let effectiveProjectId: string;
+    try {
+      const projectContext = await ensureProjectContext(
+        authRecord,
+        persistAuthClient,
+        configuredProjectId,
+        resolvedModel || undefined,
+      );
+      effectiveProjectId = projectContext.effectiveProjectId;
+      authRecord = projectContext.auth;
+    } catch (error) {
+      const fallbackParts = parseRefreshParts(authRecord.refresh);
+      const fallbackProject =
+        configuredProjectId || fallbackParts.projectId || fallbackParts.managedProjectId;
+      if (!fallbackProject) {
+        throw error;
+      }
+      effectiveProjectId = fallbackProject;
+    }
+
+    let bodyText: string | undefined;
+    try {
+      bodyText = await event.request.clone().text();
+    } catch {
+      bodyText = undefined;
+    }
+
+    const transformed = prepareAgyRequest(
+      modifiedUrl,
+      {
+        method: event.request.method || "POST",
+        headers: tierHeaders,
+        body: bodyText,
+      },
+      authRecord.access,
+      effectiveProjectId,
+      undefined,
+      event.sessionID,
+    );
+
+    const targetUrl = toUrlString(transformed.request);
+    const nextRequest = new Request(targetUrl, {
+      method: transformed.init.method || "POST",
+      headers: transformed.init.headers,
+      body: transformed.init.body,
+    });
+
+    trackedRequests.set(nextRequest, {
+      requestedModel: transformed.requestedModel ?? (resolvedModel || undefined),
+      sessionID: transformed.sessionId ?? event.sessionID,
+      streaming: transformed.streaming,
+    });
+
+    event.request = nextRequest;
   };
 }
 
-export function createV2HttpResponseHook(state: V2SessionHooksState = {}) {
-  return async (event: any) => {
-    if (!event || !event.response) return;
+export function createV2HttpResponseHook(
+  trackedRequests: WeakMap<Request, TrackedRequestMeta> = new WeakMap(),
+) {
+  return async (event: OpenCodeV2SessionHttpResponse) => {
+    if (!event?.response || !(event.response instanceof Response)) return;
 
-    const rawUrl = typeof event.url === 'string' ? event.url : (event.request?.url || '');
-    const isInternal = rawUrl.includes('cloudcode-pa.googleapis.com');
-
-    if (isInternal && event.response instanceof Response) {
-      const isStreaming = rawUrl.includes(':streamGenerateCode') ||
-        event.response.headers.get('content-type')?.includes('text/event-stream');
-
-      const parsedModel = parseGenerativeLanguageRequest(rawUrl)?.effectiveModel || state.lastInterceptedModel;
-      const transformed = await transformAgyResponse(
-        event.response,
-        !!isStreaming,
-        null,
-        parsedModel,
-        state.lastSessionId,
-        undefined
-      );
-      event.response = transformed;
+    const rawUrl = event.request?.url || "";
+    if (!rawUrl.includes("cloudcode-pa.googleapis.com")) {
+      return;
     }
+
+    const tracked = event.request ? trackedRequests.get(event.request) : undefined;
+    const isStreaming = Boolean(
+      tracked?.streaming ||
+        rawUrl.includes(":streamGenerateContent") ||
+        event.response.headers.get("content-type")?.includes("text/event-stream"),
+    );
+
+    const requestedModel =
+      tracked?.requestedModel ??
+      event.model?.id ??
+      parseGenerativeLanguageRequest(rawUrl)?.effectiveModel;
+    const sessionId = tracked?.sessionID ?? event.sessionID;
+
+    event.response = await transformAgyResponse(
+      event.response,
+      isStreaming,
+      null,
+      requestedModel,
+      sessionId,
+    );
   };
 }
 
 export function createV2RetryHook() {
-  return async (event: any) => {
-    if (!event) return;
-    const response = event.response;
-    if (response instanceof Response) {
-      if (isRetryableStatus(response.status)) {
-        const quota = await classifyQuotaResponse(response);
-        if (quota?.retryDelayMs) {
-          event.retryDelayMs = quota.retryDelayMs;
-        } else {
-          event.retryDelayMs = await resolveRetryDelayMs(response, event.attempt || 1);
+  return async (event: OpenCodeV2SessionRetry) => {
+    if (!event?.error) return;
+
+    const status = event.error.status;
+    const bodyText = event.error.response?.body;
+
+    if (status === 429) {
+      if (bodyText) {
+        const synthetic = new Response(bodyText, { status: 429 });
+        const quota = await classifyQuotaResponse(synthetic);
+        if (quota?.terminal) {
+          event.decision = { retry: false };
+          return;
+        }
+        if (quota?.retryDelayMs !== undefined) {
+          event.decision = { retry: true, delay: Math.max(0, Math.ceil(quota.retryDelayMs)) };
+          return;
         }
       }
-    } else if (event.details && Array.isArray(event.details)) {
-      const retryInfo = event.details.find(
-        (d: any) => d && d['@type'] === 'type.googleapis.com/google.rpc.RetryInfo'
-      );
-      if (retryInfo?.retryDelay) {
-        const delayMs = retryInternals.parseRetryDelayValue(retryInfo.retryDelay);
-        if (delayMs !== null) {
-          event.retryDelayMs = delayMs;
-        }
+
+      const fallbackDelay =
+        event.error.retryAfterMs ??
+        (event.decision?.retry ? event.decision.delay : getExponentialDelayWithJitter(event.attempt || 1));
+      event.decision = { retry: true, delay: Math.max(0, Math.ceil(fallbackDelay)) };
+      return;
+    }
+
+    if (typeof status === "number" && isRetryableStatus(status)) {
+      let bodyDelay: number | null = null;
+      if (bodyText) {
+        bodyDelay = await parseRetryDelayFromBody(new Response(bodyText, { status }));
       }
-    } else if (event.error && isRetryableNetworkError(event.error)) {
-      event.retryDelayMs = getExponentialDelayWithJitter(event.attempt || 1);
+      const delay =
+        bodyDelay ??
+        event.error.retryAfterMs ??
+        (event.decision?.retry ? event.decision.delay : getExponentialDelayWithJitter(event.attempt || 1));
+      event.decision = { retry: true, delay: Math.max(0, Math.ceil(delay)) };
+      return;
+    }
+
+    if (status === undefined && isRetryableNetworkError(event.error)) {
+      if (!event.decision?.retry) {
+        event.decision = {
+          retry: true,
+          delay: getExponentialDelayWithJitter(event.attempt || 1),
+        };
+      }
     }
   };
 }
 
-export function registerV2SessionHooks(ctx: any) {
-  const state: V2SessionHooksState = {};
-  ctx.session.hook('http.request', createV2HttpRequestHook(state), { providerID: AGY_PROVIDER_ID });
-  ctx.session.hook('http.response', createV2HttpResponseHook(state), { providerID: AGY_PROVIDER_ID });
-  ctx.session.hook('retry', createV2RetryHook(), { providerID: AGY_PROVIDER_ID });
+export async function registerV2SessionHooks(
+  ctx: Pick<OpenCodeV2PluginContext, "session" | "integration">,
+  options: Omit<V2SessionHookOptions, "integration"> = {},
+): Promise<void> {
+  const trackedRequests = new WeakMap<Request, TrackedRequestMeta>();
+  const hookOptions: V2SessionHookOptions = {
+    integration: ctx.integration,
+    ...options,
+  };
+
+  await ctx.session.hook("http.request", createV2HttpRequestHook(trackedRequests, hookOptions), {
+    providerID: AGY_PROVIDER_ID,
+  });
+  await ctx.session.hook("http.response", createV2HttpResponseHook(trackedRequests), {
+    providerID: AGY_PROVIDER_ID,
+  });
+  await ctx.session.hook("retry", createV2RetryHook(), {
+    providerID: AGY_PROVIDER_ID,
+  });
 }

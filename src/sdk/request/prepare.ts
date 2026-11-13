@@ -20,7 +20,7 @@ export interface ThinkingConfigDefaults {
 }
 
 /**
- * Rewrites OpenAI-style requests into the format for Gemini Code Assist requests.
+ * Rewrites Gemini Generative Language API requests into Google Code Assist requests.
  */
 export function prepareAgyRequest(
   input: RequestInfo,
@@ -28,6 +28,7 @@ export function prepareAgyRequest(
   accessToken: string,
   projectId: string,
   thinkingConfigDefaults?: ThinkingConfigDefaults,
+  sessionIdOverride?: string,
 ): {
   request: RequestInfo;
   init: RequestInit;
@@ -55,9 +56,28 @@ export function prepareAgyRequest(
     };
   }
 
+  const headerSessionId =
+    sessionIdOverride ||
+    headers.get("x-opencode-session-id")?.trim() ||
+    undefined;
+
+  // Strip internal OpenCode / API key / tier headers before forwarding to Google Code Assist
+  for (const key of Array.from(headers.keys())) {
+    const lower = key.toLowerCase();
+    if (
+      lower === "x-api-key" ||
+      lower === "api-key" ||
+      lower === "x-goog-api-key" ||
+      lower === "x-agy-tier" ||
+      lower === "x-session-affinity" ||
+      lower === "x-session-id" ||
+      lower === "x-parent-session-id" ||
+      lower.startsWith("x-opencode-")
+    ) {
+      headers.delete(key);
+    }
+  }
   headers.set("Authorization", `Bearer ${accessToken}`);
-  headers.delete("x-api-key");
-  headers.delete("x-goog-api-key");
 
   const { requestedModel: rawModel, effectiveModel, action: rawAction } = requestTarget;
   const streaming = rawAction === STREAM_ACTION;
@@ -67,7 +87,7 @@ export function prepareAgyRequest(
   }`;
 
   let body = baseInit.body;
-  let sessionId: string | undefined;
+  let sessionId: string | undefined = headerSessionId;
 
   if (typeof baseInit.body === "string" && baseInit.body) {
     const transformed = transformRequestBody(
@@ -76,11 +96,12 @@ export function prepareAgyRequest(
       effectiveModel,
       rawModel,
       thinkingConfigDefaults,
+      headerSessionId,
     );
     if (transformed.body) {
       body = transformed.body;
     }
-    sessionId = transformed.sessionId;
+    sessionId = transformed.sessionId ?? headerSessionId;
   }
 
   if (streaming) {
@@ -338,6 +359,7 @@ function transformRequestBody(
   effectiveModel: string,
   requestedModel: string,
   thinkingConfigDefaults?: ThinkingConfigDefaults,
+  sessionIdOverride?: string,
 ): { body?: string; userPromptId: string; sessionId?: string } {
   const fallbackId = randomUUID();
   try {
@@ -356,7 +378,7 @@ function transformRequestBody(
         wrappedBody.userAgent = wrappedBody.userAgent || "antigravity";
       }
 
-      const { userPromptId, sessionId, requestId } = normalizeWrappedIdentifiers(wrappedBody);
+      const { userPromptId, sessionId, requestId } = normalizeWrappedIdentifiers(wrappedBody, sessionIdOverride);
       const toolMapper = getToolMapper(sessionId);
 
       const requestPayloadInside = wrappedBody.request as Record<string, unknown> | undefined;
@@ -418,7 +440,10 @@ function transformRequestBody(
     }
 
     const requestPayload = { ...parsedBody };
-    const { userPromptId, sessionId, requestId } = normalizeRequestPayloadIdentifiers(requestPayload);
+    const { userPromptId, sessionId, requestId } = normalizeRequestPayloadIdentifiers(
+      requestPayload,
+      sessionIdOverride,
+    );
     const toolMapper = getToolMapper(sessionId);
 
     toolMapper.registerFromOpenAITools(requestPayload.tools);

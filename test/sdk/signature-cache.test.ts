@@ -11,7 +11,7 @@ describe('SignatureCache', () => {
   const tmpDir = path.join(os.tmpdir(), `sig-cache-test-${Date.now()}`);
 
   beforeEach(() => {
-    vi.stubEnv('XDG_CONFIG_HOME', tmpDir);
+    vi.stubEnv('XDG_CACHE_HOME', tmpDir);
     if (!fs.existsSync(tmpDir)) {
       fs.mkdirSync(tmpDir, { recursive: true });
     }
@@ -114,7 +114,7 @@ describe('SignatureCache', () => {
     cache.shutdown();
   });
 
-  it('flushes to disk, creates .gitignore, and reloads data', async () => {
+  it('flushes to XDG cache disk without touching .gitignore and reloads data', async () => {
     const cache1 = new SignatureCache({
       enabled: true,
       memory_ttl_seconds: 60,
@@ -127,10 +127,10 @@ describe('SignatureCache', () => {
     await cache1.flush();
     cache1.shutdown();
 
+    const cacheFilePath = path.join(tmpDir, 'opencode', 'antigravity-signature-cache.json');
+    expect(fs.existsSync(cacheFilePath)).toBe(true);
     const gitignorePath = path.join(tmpDir, 'opencode', '.gitignore');
-    expect(fs.existsSync(gitignorePath)).toBe(true);
-    const gitignoreContent = fs.readFileSync(gitignorePath, 'utf-8');
-    expect(gitignoreContent).toContain('antigravity-signature-cache.json');
+    expect(fs.existsSync(gitignorePath)).toBe(false);
 
     const cache2 = new SignatureCache({
       enabled: true,

@@ -1,14 +1,24 @@
-import { AgyCLIOAuthPlugin, GoogleOAuthPlugin } from "./src/plugin";
-import { setupOpenCodeV2, v2PluginDefinition } from "./src/plugin/v2";
-import type { DualOpenCodePlugin } from "./src/plugin/types";
+import { AGY_PROVIDER_ID } from "./src/constants";
+import {
+  setupOpenCodeV2,
+  v2PluginDefinition,
+  createV2PluginDefinition,
+  STATIC_MODELS_SIMPLE,
+  TIER_MAPPING,
+  resolveModelTier,
+  resolveModelVariants,
+} from "./src/plugin/v2";
 
-export { AgyCLIOAuthPlugin, GoogleOAuthPlugin };
-export { setupOpenCodeV2, v2PluginDefinition };
+export {
+  AGY_PROVIDER_ID,
+  setupOpenCodeV2,
+  v2PluginDefinition,
+  createV2PluginDefinition,
+  STATIC_MODELS_SIMPLE,
+  TIER_MAPPING,
+  resolveModelTier,
+  resolveModelVariants,
+};
 export * from "./src/plugin/types";
 
-const dualPlugin: DualOpenCodePlugin = {
-  ...v2PluginDefinition,
-  server: AgyCLIOAuthPlugin,
-};
-
-export default dualPlugin;
+export default v2PluginDefinition;

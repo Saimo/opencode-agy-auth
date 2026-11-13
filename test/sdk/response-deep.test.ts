@@ -1,25 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { transformAgyResponse } from '../../src/sdk/request/response';
-import { createChatLogger } from '../../src/sdk/chat-logger';
 
 describe('transformAgyResponse deep coverage', () => {
-  it('handles non-JSON and non-eventstream response with chatLogger', async () => {
-    const chatLogger = createChatLogger();
+  it('handles non-JSON and non-eventstream response', async () => {
     const headers = new Headers({ 'content-type': 'text/html' });
     const originalRes = new Response('<html>Error</html>', { status: 502, statusText: 'Bad Gateway', headers });
 
-    const logHeadersSpy = chatLogger ? vi.spyOn(chatLogger, 'logResponseHeaders') : null;
-    const logBodySpy = chatLogger ? vi.spyOn(chatLogger, 'logResponseBody') : null;
-
-    const res = await transformAgyResponse(originalRes, false, null, 'gemini-2.5-pro', 'sess-1', chatLogger);
+    const res = await transformAgyResponse(originalRes, false, null, 'gemini-2.5-pro', 'sess-1');
     expect(res.status).toBe(502);
-
-    if (logHeadersSpy) {
-      expect(logHeadersSpy).toHaveBeenCalledWith(502, 'Bad Gateway', headers);
-    }
-    if (logBodySpy) {
-      expect(logBodySpy).toHaveBeenCalledWith('[Non-JSON response (body omitted)]');
-    }
+    expect(await res.text()).toBe('<html>Error</html>');
   });
 
   it('attaches all prompt, candidates, cached, and total usage headers', async () => {

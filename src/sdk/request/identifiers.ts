@@ -40,7 +40,11 @@ function resolveUserPromptId(payload: Record<string, unknown>, request?: Record<
   );
 }
 
-function resolveSessionId(payload: Record<string, unknown>, request?: Record<string, unknown>): string {
+function resolveSessionId(
+  payload: Record<string, unknown>,
+  request?: Record<string, unknown>,
+  fallbackSessionId?: string,
+): string {
   const extra = isRecord(payload.extra_body) ? payload.extra_body : undefined;
   return (
     pickString(
@@ -50,6 +54,7 @@ function resolveSessionId(payload: Record<string, unknown>, request?: Record<str
       payload.sessionId,
       extra?.session_id,
       extra?.sessionId,
+      fallbackSessionId,
     ) ?? PROCESS_SESSION_ID
   );
 }
@@ -72,10 +77,11 @@ function stripSessionIdentifierAliases(payload: Record<string, unknown>): void {
  */
 export function normalizeWrappedIdentifiers(
   wrapped: Record<string, unknown>,
+  fallbackSessionId?: string,
 ): { userPromptId: string; sessionId: string; requestId: string } {
   const request = isRecord(wrapped.request) ? { ...wrapped.request } : {};
   const userPromptId = resolveUserPromptId(wrapped, request);
-  const sessionId = resolveSessionId(wrapped, request);
+  const sessionId = resolveSessionId(wrapped, request, fallbackSessionId);
   const requestId = formatAgyRequestId(userPromptId, sessionId);
 
   request.session_id = sessionId;
@@ -93,9 +99,10 @@ export function normalizeWrappedIdentifiers(
  */
 export function normalizeRequestPayloadIdentifiers(
   payload: Record<string, unknown>,
+  fallbackSessionId?: string,
 ): { userPromptId: string; sessionId: string; requestId: string } {
   const userPromptId = resolveUserPromptId(payload);
-  const sessionId = resolveSessionId(payload);
+  const sessionId = resolveSessionId(payload, undefined, fallbackSessionId);
   const requestId = formatAgyRequestId(userPromptId, sessionId);
 
   payload.session_id = sessionId;

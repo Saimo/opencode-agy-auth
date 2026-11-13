@@ -1,83 +1,60 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi } from "vitest";
 import pluginDefault, {
-  AgyCLIOAuthPlugin,
-  GoogleOAuthPlugin,
+  AGY_PROVIDER_ID,
+  STATIC_MODELS_SIMPLE,
+  TIER_MAPPING,
+  createV2PluginDefinition,
+  resolveModelTier,
+  resolveModelVariants,
   setupOpenCodeV2,
   v2PluginDefinition,
-} from '../../index';
-import { AGY_PROVIDER_ID } from '../../src/constants';
-import { AGY_QUOTA_TOOL_NAME } from '../../src/plugin/quota';
-import { AGY_QUOTA_SUMMARY_TOOL_NAME } from '../../src/plugin/quota-summary';
-import type { OpenCodeV2PluginContext } from '../../src/plugin/types';
+} from "../../index";
+import type { OpenCodeV2PluginContext } from "../../src/plugin/types";
 
-describe('index entrypoint dual v1/v2 export', () => {
-  it('exports dual plugin object as default export', () => {
+describe("index entrypoint pure OpenCode v2 export", () => {
+  it("exports pure OpenCode v2 plugin object as default export", () => {
     expect(pluginDefault).toBeDefined();
     expect(pluginDefault.id).toBe(AGY_PROVIDER_ID);
-    expect(typeof pluginDefault.setup).toBe('function');
-    expect(typeof pluginDefault.server).toBe('function');
-  });
-
-  it('exposes identical setup and v2PluginDefinition references', () => {
     expect(pluginDefault.setup).toBe(setupOpenCodeV2);
-    expect(pluginDefault.id).toBe(v2PluginDefinition.id);
+    expect(pluginDefault).toBe(v2PluginDefinition);
+    expect(createV2PluginDefinition()).toBe(v2PluginDefinition);
   });
 
-  it('invokes v1 plugin function via .server and returns v1 plugin shape', async () => {
-    const mockClient = {
-      app: {
-        log: vi.fn(),
-      },
-    };
-
-    const v1Result = await pluginDefault.server({ client: mockClient });
-    expect(v1Result).toBeDefined();
-    expect(typeof v1Result.config).toBe('function');
-    expect(typeof v1Result.tool).toBe('object');
-    expect(v1Result.tool[AGY_QUOTA_TOOL_NAME]).toBeDefined();
-    expect(v1Result.tool[AGY_QUOTA_SUMMARY_TOOL_NAME]).toBeDefined();
-    expect(typeof v1Result.auth).toBe('object');
-    expect(v1Result.auth.provider).toBe(AGY_PROVIDER_ID);
-    expect(typeof v1Result.auth.loader).toBe('function');
-    expect(typeof v1Result.provider).toBe('object');
-    expect(typeof v1Result.provider.models).toBe('function');
+  it("exports model catalog and tier resolution helpers without v1 or quota bloat", () => {
+    expect(Object.keys(STATIC_MODELS_SIMPLE)).toContain("gemini-3.8-flash");
+    expect(TIER_MAPPING["gemini-4-hydrogen"]?.xhigh).toBeDefined();
+    expect(resolveModelTier("gemini-4-hydrogen", { headers: { "x-agy-tier": "xhigh" } })).toBe(
+      "gemini-4-hydrogen-xhigh",
+    );
+    expect(resolveModelVariants("gemini-3.8-flash")).toEqual([
+      { id: "low", headers: { "x-agy-tier": "low" } },
+      { id: "medium", headers: { "x-agy-tier": "medium" } },
+      { id: "high", headers: { "x-agy-tier": "high" } },
+    ]);
   });
 
-  it('invokes v2 setup function via .setup', async () => {
+  it("invokes setupOpenCodeV2 and returns cleanup callback", async () => {
     const mockCtx: OpenCodeV2PluginContext = {
-      catalog: {
-        transform: vi.fn(),
+      integration: {
+        transform: vi.fn(async () => {}),
       },
-      tool: {
-        transform: vi.fn(),
-      },
-      command: {
-        transform: vi.fn(),
+      provider: {
+        transform: vi.fn(async () => {}),
       },
       session: {
-        hook: vi.fn(),
-      },
-      integration: {
-        transform: vi.fn(),
+        hook: vi.fn(async () => {}),
       },
       location: {
-        root: '/test',
-        workspace: '/test/workspace',
+        root: "/test",
+        workspace: "/test/workspace",
       },
     };
 
-    await pluginDefault.setup(mockCtx);
-
-    expect(mockCtx.catalog.transform).toHaveBeenCalledTimes(1);
-    expect(mockCtx.tool.transform).toHaveBeenCalledTimes(1);
-    expect(mockCtx.command.transform).toHaveBeenCalledTimes(1);
-    expect(mockCtx.session.hook).toHaveBeenCalled();
-  });
-
-  it('preserves named exports AgyCLIOAuthPlugin and GoogleOAuthPlugin', () => {
-    expect(AgyCLIOAuthPlugin).toBeDefined();
-    expect(GoogleOAuthPlugin).toBeDefined();
-    expect(GoogleOAuthPlugin).toBe(AgyCLIOAuthPlugin);
-    expect(pluginDefault.server).toBe(AgyCLIOAuthPlugin);
+    const cleanup = await pluginDefault.setup(mockCtx);
+    expect(typeof cleanup).toBe("function");
+    expect(mockCtx.integration.transform).toHaveBeenCalledTimes(1);
+    expect(mockCtx.provider.transform).toHaveBeenCalledTimes(1);
+    expect(mockCtx.session.hook).toHaveBeenCalledTimes(3);
+    await cleanup();
   });
 });

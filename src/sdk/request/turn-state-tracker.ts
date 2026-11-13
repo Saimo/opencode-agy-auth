@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
+import { getAgyCacheDir } from "../cache-dir";
 import { analyzeConversationState, type ConversationState } from "./thinking";
 
 export type TurnState = Pick<ConversationState, "inToolLoop" | "turnHasThinking" | "lastModelHasThinking" | "lastModelHasToolCalls">;
@@ -18,17 +19,8 @@ interface TurnStateData {
 
 const WRITE_THROTTLE_MS = 5000;
 
-function getConfigDir(): string {
-  const platform = process.platform;
-  if (platform === "win32") {
-    return join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "opencode");
-  }
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(xdgConfig, "opencode");
-}
-
 function getTurnStateFilePath(): string {
-  return join(getConfigDir(), "antigravity-turn-states.json");
+  return join(getAgyCacheDir(), "antigravity-turn-states.json");
 }
 
 function loadTurnStatesFromDisk(): Map<string, TurnStateRecord> {

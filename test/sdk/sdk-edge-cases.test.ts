@@ -78,14 +78,9 @@ describe('SDK Edge Cases Coverage', () => {
     });
   });
 
-  describe('response.ts streaming transform with chatLogger and turnStateTracker', () => {
-    it('executes streaming transformer callbacks on turn state update and cache signature (lines 138-149)', async () => {
+  describe('response.ts streaming transform with turnStateTracker', () => {
+    it('executes streaming transformer callbacks on turn state update and cache signature', async () => {
       initTurnStateTracker();
-      const chatLoggerMock: any = {
-        logResponseHeaders: vi.fn(),
-        logResponseBody: vi.fn(),
-        createLoggingTransformStream: vi.fn(() => new TransformStream())
-      };
 
       const payload = `data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"Thinking step","thoughtSignature":"sig-123"},{"functionCall":{"name":"tool1","args":{}}}]}}]}\n\n`;
 
@@ -100,19 +95,12 @@ describe('SDK Edge Cases Coverage', () => {
         headers: { 'Content-Type': 'text/event-stream' }
       });
 
-      const result = await transformAgyResponse(response, true, null, 'gemini-2.5-flash', 'session-xyz', chatLoggerMock);
+      const result = await transformAgyResponse(response, true, null, 'gemini-2.5-flash', 'session-xyz');
       const text = await result.text();
       expect(text).toContain('Thinking step');
-      expect(chatLoggerMock.createLoggingTransformStream).toHaveBeenCalled();
     });
 
-    it('transforms non-streaming payload with chatLogger (lines 100-115)', async () => {
-      const chatLoggerMock: any = {
-        logResponseHeaders: vi.fn(),
-        logResponseBody: vi.fn(),
-        close: vi.fn()
-      };
-
+    it('transforms non-streaming payload', async () => {
       const resp = new Response(JSON.stringify({
         response: {
           candidates: [{ content: { parts: [{ text: 'Hello' }] } }]
@@ -121,9 +109,10 @@ describe('SDK Edge Cases Coverage', () => {
         headers: { 'Content-Type': 'application/json' }
       });
 
-      const transformed = await transformAgyResponse(resp, false, null, 'gemini-2.5-flash', 'session-xyz', chatLoggerMock);
+      const transformed = await transformAgyResponse(resp, false, null, 'gemini-2.5-flash', 'session-xyz');
       expect(transformed.status).toBe(200);
-      expect(chatLoggerMock.logResponseBody).toHaveBeenCalled();
+      const parsed = await transformed.json();
+      expect(parsed.candidates[0].content.parts[0].text).toBe('Hello');
     });
   });
 

@@ -7,9 +7,8 @@ import { resolveConfiguredProjectId } from './provider';
 import { formatRefreshParts } from './auth';
 import type { OAuthAuthDetails, PluginClient } from './types';
 
-
 /**
- * Builds the OAuth authorization callback for the plugin authentication method.
+ * Builds the OAuth authorization callback for standalone/helper authentication flows.
  */
 export function createOAuthAuthorizeMethod(options?: {
   client?: PluginClient;
@@ -60,17 +59,6 @@ export function createOAuthAuthorizeMethod(options?: {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.warn(`[OAuth] Project resolution skipped: ${message}`);
-        if (options?.client?.tui?.showToast) {
-          const message = error instanceof Error ? error.message : String(error);
-          options.client.tui.showToast({
-            body: {
-              title: "Failed to bind project context",
-              message: `Authorized successfully but failed to bind project, real models will be unavailable: ${message}`,
-              variant: "warning",
-              duration: 15000
-            }
-          }).catch(() => {});
-        }
         const initialRefresh = formatRefreshParts({
           refreshToken: result.refresh
         });
@@ -97,8 +85,8 @@ export function createOAuthAuthorizeMethod(options?: {
     return {
       url: authorization.url,
       instructions: isHeadless
-        ? 'Headless/SSH environment detected. Browser auto-open skipped. Please manually open the following URL in a browser on your local machine to authorize:\n\n' + authorization.url + '\n\nAfter authorization, the page will redirect to https://antigravity.google/oauth-callback?code=... . Copy the full redirect URL from your browser address bar, or just the code parameter value, and paste it into the input box below.\n\nNote: If you are not in a headless environment, unset OPENCODE_HEADLESS or run without SSH to enable browser auto-open.'
-        : 'Please complete Google account authorization in your browser. After authorization, the page will redirect to https://antigravity.google/oauth-callback?code=... . Please copy the full redirect URL from your browser address bar, or just the code parameter value, and paste it into the input box below:',
+        ? 'Headless/SSH environment detected. Browser auto-open skipped. Please manually open the following URL in a browser on your local machine to authorize:\n\n' + authorization.url + '\n\nAfter authorization, the page will redirect to https://antigravity.google/oauth-callback?code=... . Copy the full redirect URL from your browser address bar, or just the code parameter value, and paste it into the input box below.'
+        : 'Please complete Google account authorization in your browser. After authorization, the page will redirect to https://antigravity.google/oauth-callback?code=... . Copy the full redirect URL from your browser address bar, or just the code parameter value, and paste it into the input box below:',
       method: 'code',
       callback: async (callbackUrl: string): Promise<AgyTokenExchangeResult> => {
         try {
@@ -168,7 +156,6 @@ export function defaultOpenBrowserLauncher(command: string, args: string[]) {
 let openBrowserLauncher = defaultOpenBrowserLauncher;
 
 function openBrowserUrl(url: string): void {
-  // If no mock launcher is provided during tests, skip opening real desktop browser
   if ((process.env.NODE_ENV === 'test' || process.env.VITEST) && openBrowserLauncher === defaultOpenBrowserLauncher) {
     return;
   }

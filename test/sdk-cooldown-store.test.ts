@@ -21,7 +21,7 @@ describe("cooldown-store", () => {
 
   it("handles saving and loading valid cooldowns", () => {
     const testDir = join(tmpdir(), `cooldown-test-${Date.now()}`);
-    process.env.XDG_CONFIG_HOME = testDir;
+    process.env.XDG_CACHE_HOME = testDir;
 
     const entries = new Map<string, number>();
     const futureTime = Date.now() + 10000;
@@ -46,15 +46,15 @@ describe("cooldown-store", () => {
 
   it("returns empty map on missing file or invalid json/version", () => {
     const testDir = join(tmpdir(), `cooldown-test-empty-${Date.now()}`);
-    process.env.XDG_CONFIG_HOME = testDir;
+    process.env.XDG_CACHE_HOME = testDir;
 
     const loaded = loadCooldowns();
     expect(loaded.size).toBe(0);
   });
 
-  it("handles platform win32 config dir", () => {
+  it("handles platform win32 cache dir", () => {
     const testDir = join(tmpdir(), `cooldown-test-win-${Date.now()}`);
-    process.env.APPDATA = testDir;
+    process.env.LOCALAPPDATA = testDir;
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
 
     const entries = new Map<string, number>();
@@ -68,7 +68,7 @@ describe("cooldown-store", () => {
   it("CooldownStore class marks dirty, flushes, schedules throttled write and shuts down", () => {
     vi.useFakeTimers();
     const testDir = join(tmpdir(), `cooldown-test-store-${Date.now()}`);
-    process.env.XDG_CONFIG_HOME = testDir;
+    process.env.XDG_CACHE_HOME = testDir;
 
     const store = new CooldownStore();
     const entries = new Map<string, number>();

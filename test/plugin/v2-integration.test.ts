@@ -1,384 +1,172 @@
-import { describe, it, expect, vi } from 'vitest';
-import { setupOpenCodeV2, setStoredAuthOverrideForTesting } from '../../src/plugin/v2';
-import { AGY_PROVIDER_ID } from '../../src/constants';
-import { AGY_QUOTA_TOOL_NAME } from '../../src/plugin/quota';
-import { AGY_QUOTA_SUMMARY_TOOL_NAME } from '../../src/plugin/quota-summary';
-import type { OpenCodeV2PluginContext } from '../../src/plugin/types';
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AGY_PROVIDER_ID } from "../../src/constants";
+import { setupOpenCodeV2 } from "../../src/plugin/v2";
+import type {
+  OpenCodeV2OAuthCredential,
+  OpenCodeV2PluginContext,
+  OpenCodeV2ProviderInfo,
+  OpenCodeV2SessionHookMap,
+} from "../../src/plugin/types";
 
-describe('OpenCode v2 Integration and Edge Cases', () => {
-  const createMockContext = () => {
-    let catalogTransformFn: ((catalog: any) => Promise<void> | void) | undefined;
-    let toolTransformFn: ((editor: any) => Promise<void> | void) | undefined;
-    let commandTransformFn: ((editor: any) => Promise<void> | void) | undefined;
-    const sessionHooks: Record<string, (event: any) => Promise<void> | void> = {};
+describe("OpenCode v2 end-to-end provider integration", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const createHarness = (activeCred?: OpenCodeV2OAuthCredential, options?: Record<string, unknown>) => {
+    const hooks: Partial<OpenCodeV2SessionHookMap> = {};
+    const providers: Record<string, OpenCodeV2ProviderInfo> = {};
 
     const ctx: OpenCodeV2PluginContext = {
-      catalog: {
-        transform: vi.fn((fn) => {
-          catalogTransformFn = fn;
-        })
+      options,
+      integration: {
+        transform: vi.fn(async () => {}),
+        connection: activeCred
+          ? {
+              active: vi.fn(async () => ({ id: "conn_1" })),
+              resolve: vi.fn(async () => ({ type: "credential" as const, credential: activeCred })),
+            }
+          : undefined,
       },
-      tool: {
-        transform: vi.fn((fn) => {
-          toolTransformFn = fn;
-        })
-      },
-      command: {
-        transform: vi.fn((fn) => {
-          commandTransformFn = fn;
-        })
+      provider: {
+        transform: vi.fn(async (fn) => {
+          fn({
+            update(id, cb) {
+              const draft = providers[id] ?? { id };
+              cb(draft);
+              providers[id] = draft;
+            },
+            models: {
+              update() {},
+            },
+          });
+        }),
       },
       session: {
-        hook: vi.fn((name, handler) => {
-          sessionHooks[name] = handler;
-        })
-      },
-      integration: {
-        transform: vi.fn()
+        hook: vi.fn(async (event, handler) => {
+          (hooks as Record<string, unknown>)[event] = handler;
+        }),
       },
       location: {
-        root: '/workspace',
-        workspace: '/workspace/project'
-      }
+        root: "/workspace",
+        workspace: "/workspace/app",
+      },
     };
 
-    return {
-      ctx,
-      getCatalogTransform: () => catalogTransformFn,
-      getToolTransform: () => toolTransformFn,
-      getCommandTransform: () => commandTransformFn,
-      getSessionHook: (name: string) => sessionHooks[name]
-    };
+    return { ctx, hooks, providers };
   };
 
-  describe('catalog.transform edge cases', () => {
-    it('handles pre-existing provider and model configurations without overwriting', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const transform = harness.getCatalogTransform()!;
+  it("does not touch any tool or command domains (strictly provider-only)", async () => {
+    const harness = createHarness();
+    const cleanup = await setupOpenCodeV2(harness.ctx);
 
-      const existingCatalog: any = {
-        providers: {
-          [AGY_PROVIDER_ID]: {
-            id: AGY_PROVIDER_ID,
-            name: 'Custom Antigravity Provider',
-            customField: true,
-            models: {
-              'gemini-3.8-flash': {
-                id: 'gemini-3.8-flash',
-                name: 'Custom Flash Name',
-                customModelField: 'keep-me'
-              }
-            }
-          }
-        }
-      };
+    expect(harness.ctx.provider.transform).toHaveBeenCalledTimes(1);
+    expect(harness.ctx.integration.transform).toHaveBeenCalledTimes(1);
+    expect(harness.ctx.session.hook).toHaveBeenCalledTimes(3);
+    expect((harness.ctx as Record<string, unknown>).tool).toBeUndefined();
+    expect((harness.ctx as Record<string, unknown>).command).toBeUndefined();
 
-      await transform(existingCatalog);
-
-      const provider = existingCatalog.providers[AGY_PROVIDER_ID];
-      expect(provider.name).toBe('Custom Antigravity Provider');
-      expect(provider.customField).toBe(true);
-
-      const flashModel = provider.models['gemini-3.8-flash'];
-      expect(flashModel.name).toBe('Custom Flash Name');
-      expect(flashModel.customModelField).toBe('keep-me');
-      expect(flashModel.family).toBe('gemini');
-      expect(flashModel.providerID).toBe(AGY_PROVIDER_ID);
-    });
-
-    it('populates family correctly across gemini, claude, gpt, and unknown models', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const transform = harness.getCatalogTransform()!;
-
-      const catalog: any = {};
-      await transform(catalog);
-
-      const models = catalog.providers[AGY_PROVIDER_ID].models;
-      expect(models['gemini-3.8-flash'].family).toBe('gemini');
-      expect(models['claude-sonnet-5-5'].family).toBe('claude');
-      expect(models['gpt-oss-120b-medium'].family).toBe('gpt');
-    });
+    await cleanup();
   });
 
-  describe('tool.transform registration edge cases', () => {
-    it('invokes tools with getAuthResolver and getConfiguredProjectId returning undefined', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const transform = harness.getToolTransform()!;
+  it("preserves user-customized provider name while enforcing google-agy runtime fields", async () => {
+    const harness = createHarness();
+    harness.providers[AGY_PROVIDER_ID] = {
+      id: AGY_PROVIDER_ID,
+      name: "My Custom Agy",
+    };
 
-      const target: any = {};
-      await transform(target);
-
-      const quotaTool = target[AGY_QUOTA_TOOL_NAME];
-      const summaryTool = target[AGY_QUOTA_SUMMARY_TOOL_NAME];
-
-      expect(quotaTool).toBeDefined();
-      expect(summaryTool).toBeDefined();
-
-      setStoredAuthOverrideForTesting(null);
-      try {
-        const quotaOutput = await quotaTool.execute({});
-        expect(quotaOutput).toContain('unavailable before Google auth is initialized');
-
-        const summaryOutput = await summaryTool.execute({});
-        expect(summaryOutput).toContain('unavailable before Google auth is initialized');
-      } finally {
-        setStoredAuthOverrideForTesting(undefined);
-      }
-    });
+    const cleanup = await setupOpenCodeV2(harness.ctx);
+    expect(harness.providers[AGY_PROVIDER_ID].name).toBe("My Custom Agy");
+    expect(harness.providers[AGY_PROVIDER_ID].package).toBe("@opencode/ai/providers/google");
+    expect(harness.providers[AGY_PROVIDER_ID].activation).toBe("auto");
+    expect(harness.providers[AGY_PROVIDER_ID].integrationID).toBe(AGY_PROVIDER_ID);
+    await cleanup();
   });
 
-  describe('command.transform registration edge cases', () => {
-    it('registers quota commands across all supported editor container shapes', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const transform = harness.getCommandTransform()!;
-
-      // Map editor
-      const mapEditor = new Map<string, any>();
-      await transform(mapEditor);
-      expect(mapEditor.has('agy-quota')).toBe(true);
-      expect(mapEditor.has('agy-quota-summary')).toBe(true);
-
-      // Container with .commands object
-      const propEditor: any = { commands: {} };
-      await transform(propEditor);
-      expect(propEditor.commands['agy-quota']).toBeDefined();
-      expect(propEditor.commands['agy-quota-summary']).toBeDefined();
-
-      // Flat dictionary
-      const flatEditor: any = {};
-      await transform(flatEditor);
-      expect(flatEditor['agy-quota']).toBeDefined();
-      expect(flatEditor['agy-quota-summary']).toBeDefined();
+  it("runs full request -> response roundtrip for Code Assist JSON and sanitizes/restores tool names", async () => {
+    const harness = createHarness({
+      type: "oauth",
+      methodID: "oauth",
+      access: "e2e-token",
+      refresh: "e2e-refresh|proj-e2e|managed-e2e",
+      expires: Date.now() + 3600_000,
     });
-  });
 
-  describe('session http.request hook edge cases', () => {
-    it('handles event.request.url when top-level url is absent', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRequest = harness.getSessionHook('http.request');
+    const cleanup = await setupOpenCodeV2(harness.ctx);
 
-      const event: any = {
-        request: {
-          url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent'
+    const reqEvent = {
+      sessionID: "ses_e2e_1",
+      providerID: AGY_PROVIDER_ID,
+      model: { id: "claude-sonnet-5-5", providerID: AGY_PROVIDER_ID, variant: "high" },
+      attempt: 1,
+      request: new Request(
+        "https://generativelanguage.googleapis.com/v1beta/models/claude-sonnet-5-5:generateContent",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-goog-api-key": "placeholder",
+          },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: "Call mcp$tool" }] }],
+            tools: [
+              {
+                functionDeclarations: [
+                  {
+                    name: "mcp$tool",
+                    description: "MCP tool with special char",
+                    parametersJsonSchema: { type: "object", properties: {} },
+                  },
+                ],
+              },
+            ],
+          }),
         },
-        headers: {}
-      };
+      ),
+    };
 
-      await onRequest(event);
-      expect(event.headers['User-Agent']).toContain('antigravity');
-    });
+    await harness.hooks["http.request"]!(reqEvent);
+    expect(reqEvent.request.url).toBe(
+      "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent",
+    );
 
-    it('ignores completely irrelevant URLs and requests', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRequest = harness.getSessionHook('http.request');
+    const outboundBody = JSON.parse(await reqEvent.request.clone().text());
+    expect(outboundBody.model).toBe("claude-sonnet-5-5-high");
+    const sanitizedName = outboundBody.request.tools[0].functionDeclarations[0].name;
+    expect(sanitizedName).not.toContain("$");
 
-      const events = [
-        { url: 'https://api.github.com/repos' },
-        { url: 'https://google.com' },
-        { request: { url: 'https://anthropic.com' } },
-        { request: {} },
-        {}
-      ];
-
-      for (const evt of events) {
-        await onRequest(evt);
-        expect((evt as any).headers).toBeUndefined();
-      }
-    });
-
-    it('preserves existing lowercase user-agent header in plain object', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRequest = harness.getSessionHook('http.request');
-
-      const event: any = {
-        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
-        headers: {
-          'user-agent': 'existing-lowercase-agent'
-        }
-      };
-
-      await onRequest(event);
-      expect(event.headers['user-agent']).toBe('existing-lowercase-agent');
-      expect(event.headers['User-Agent']).toBeUndefined();
-    });
-
-    it('sets User-Agent on generative language request when missing', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRequest = harness.getSessionHook('http.request');
-
-      const event: any = {
-        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent',
-        headers: {}
-      };
-
-      await onRequest(event);
-      expect(event.headers['User-Agent']).toContain('antigravity/cli/');
-    });
-  });
-
-  describe('session http.response hook edge cases', () => {
-    it('handles various response status codes without errors', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onResponse = harness.getSessionHook('http.response');
-
-      await onResponse(null);
-      await onResponse({});
-      await onResponse({ response: { status: 200 } });
-      await onResponse({ response: { status: 429 } });
-      await onResponse({ response: { status: 500 } });
-    });
-
-    it('transforms internal Code Assist response and yields a Response object with numeric status', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRequest = harness.getSessionHook('http.request');
-      const onResponse = harness.getSessionHook('http.response');
-
-      const reqEvent: any = {
-        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
-        headers: {},
-        auth: {
-          type: 'oauth',
-          access: 'test-token',
-          refresh: 'token|project-123|citric-engine-123'
-        },
-        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Hello World' }] }] })
-      };
-      await onRequest(reqEvent);
-
-      const agyPayload = {
+    const codeAssistEnvelope = {
+      response: {
         candidates: [
           {
             content: {
-              parts: [{ text: 'Hello World response' }],
-              role: 'model'
+              role: "model",
+              parts: [{ functionCall: { name: sanitizedName, args: {} } }],
             },
-            finishReason: 'STOP'
-          }
-        ]
-      };
+            finishReason: "STOP",
+          },
+        ],
+      },
+    };
 
-      const respEvent: any = {
-        url: reqEvent.url, // rewritten to cloudcode-pa.googleapis.com
-        response: new Response(JSON.stringify(agyPayload), {
-          status: 200,
-          headers: { 'content-type': 'application/json' }
-        })
-      };
+    const resEvent = {
+      sessionID: "ses_e2e_1",
+      providerID: AGY_PROVIDER_ID,
+      model: { id: "claude-sonnet-5-5", providerID: AGY_PROVIDER_ID, variant: "high" },
+      attempt: 1,
+      request: reqEvent.request,
+      response: new Response(JSON.stringify(codeAssistEnvelope), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+      duration: 85,
+    };
 
-      await onResponse(respEvent);
+    await harness.hooks["http.response"]!(resEvent);
+    const unwrapped = await resEvent.response.json();
+    expect(unwrapped.candidates[0].content.parts[0].functionCall.name).toBe("mcp$tool");
 
-      expect(respEvent.response).toBeInstanceOf(Response);
-      expect(typeof respEvent.response.status).toBe('number');
-      expect(respEvent.response.status).toBe(200);
-
-      const body = await respEvent.response.json();
-      expect(body.candidates[0].content.parts[0].text).toBe('Hello World response');
-    });
-  });
-
-  describe('session retry hook edge cases', () => {
-    it('handles 503 Service Unavailable with exponential/resolved backoff', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRetry = harness.getSessionHook('retry');
-
-      const response503 = new Response('Service Unavailable', {
-        status: 503,
-        headers: {
-          'retry-after': '10'
-        }
-      });
-
-      const event: any = {
-        response: response503,
-        attempt: 2
-      };
-
-      await onRetry(event);
-      expect(event.retryDelayMs).toBe(10000);
-    });
-
-    it('handles 429 without RetryInfo by falling back to resolveRetryDelayMs', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRetry = harness.getSessionHook('retry');
-
-      const response429 = new Response(JSON.stringify({ error: { message: 'Too Many Requests' } }), {
-        status: 429,
-        headers: {
-          'retry-after-ms': '4200'
-        }
-      });
-
-      const event: any = {
-        response: response429
-      };
-
-      await onRetry(event);
-      expect(event.retryDelayMs).toBe(4200);
-    });
-
-    it('ignores responses with non-retryable status codes (e.g., 400, 401, 404)', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRetry = harness.getSessionHook('retry');
-
-      const nonRetryable = new Response('Bad Request', { status: 400 });
-      const event: any = { response: nonRetryable };
-
-      await onRetry(event);
-      expect(event.retryDelayMs).toBeUndefined();
-    });
-
-    it('parses retryDelay from details array when response is not a Response instance', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRetry = harness.getSessionHook('retry');
-
-      // Valid RetryInfo details
-      const validEvent: any = {
-        details: [
-          {
-            '@type': 'type.googleapis.com/google.rpc.RetryInfo',
-            retryDelay: '3.2s'
-          }
-        ]
-      };
-      await onRetry(validEvent);
-      expect(validEvent.retryDelayMs).toBe(3200);
-
-      // Malformed or unknown details items
-      const invalidDetailsEvent: any = {
-        details: [
-          null,
-          { '@type': 'other.type' },
-          { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: 'invalid-seconds' }
-        ]
-      };
-      await onRetry(invalidDetailsEvent);
-      expect(invalidDetailsEvent.retryDelayMs).toBeUndefined();
-    });
-
-    it('handles empty, null, or undefined event gracefully', async () => {
-      const harness = createMockContext();
-      await setupOpenCodeV2(harness.ctx);
-      const onRetry = harness.getSessionHook('retry');
-
-      await onRetry(null);
-      await onRetry(undefined);
-      const emptyEvent: any = {};
-      await onRetry(emptyEvent);
-      expect(emptyEvent.retryDelayMs).toBeUndefined();
-    });
+    await cleanup();
   });
 });

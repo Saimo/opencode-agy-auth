@@ -435,13 +435,17 @@ export function deduplicateThinkingText(
 
         if (p.thought === true || p.type === "thinking" || p.type === "reasoning") {
           const fullText = (p.text || p.thinking || "") as string;
+          const sig =
+            typeof p.thoughtSignature === "string" && p.thoughtSignature.length > 0
+              ? p.thoughtSignature
+              : undefined;
 
-          // If this thought chain was already rendered, block it directly from the stream to prevent long overlapping rendering in tool call branches
+          // If this thought chain was already rendered, block duplicate text while preserving any trailing signature
           if (displayedThinkingHashes) {
             const hash = hashString(fullText);
             if (displayedThinkingHashes.has(hash)) {
               sentBuffer.set(index, fullText);
-              return null;
+              return sig ? { thought: true, text: "", thoughtSignature: sig } : null;
             }
             displayedThinkingHashes.add(hash);
           }
@@ -454,9 +458,9 @@ export function deduplicateThinkingText(
             sentBuffer.set(index, fullText);
 
             if (delta) {
-              return { ...p, text: delta, thinking: delta };
+              return { ...p, text: delta };
             }
-            return null;
+            return sig ? { thought: true, text: "", thoughtSignature: sig } : null;
           }
 
           sentBuffer.set(index, fullText);

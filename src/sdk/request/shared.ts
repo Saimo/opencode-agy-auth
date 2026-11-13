@@ -33,7 +33,7 @@ export function toRequestUrlString(value: RequestInfo): string {
 /**
  * Detects Gemini/Generative Language API requests via URL.
  */
-export function isGenerativeLanguageRequest(input: RequestInfo): input is string {
+export function isGenerativeLanguageRequest(input: RequestInfo): boolean {
   const url = toRequestUrlString(input);
   return (
     url.includes(GENERATIVE_LANGUAGE_HOST) ||

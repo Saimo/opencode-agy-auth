@@ -4,9 +4,8 @@ export default defineConfig({
   entry: ["index.ts"],
   format: ["esm"],
   dts: false,
-  sourcemap: true,
+  sourcemap: false,
   clean: true,
   splitting: false,
   target: "node20",
-  noExternal: ["@opencode-ai/plugin", "@openauthjs/openauth"],
 });
