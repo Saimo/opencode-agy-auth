@@ -1,21 +1,10 @@
+import { AGY_ACP_PACKAGE, AGY_AISDK_PACKAGE, AGY_PROVIDER_ID, AGY_PROVIDER_NAME } from "../constants";
+import { STATIC_MODELS_SIMPLE, TIER_MAPPING, resolveModelTier } from "./tier";
 import { type OpenCodeV2Cleanup, type OpenCodeV2ModelVariant, type OpenCodeV2PluginContext, type OpenCodeV2PluginDefinition } from "./types";
-export { getSafeHeader, setSafeHeaders, toUrlString } from "./headers";
-export { STATIC_MODELS_SIMPLE, TIER_MAPPING, resolveModelTier, type SimpleStaticModel } from "./tier";
-export { getDiskSignatureCache, resetDiskSignatureCacheForTesting } from "./cache";
-export { registerV2WebSearch, resolveWebSearchConfig } from "./v2-websearch";
-export { executeAgyWebSearch, parseAgyWebSearchPayload } from "../sdk/websearch";
-export { loadStoredAuthFromJson, saveStoredAuthToJson, setStoredAuthOverrideForTesting, } from "./v2-storage";
-export declare function resetDynamicModelsForTesting(): void;
+import { AGY_WEBSEARCH_PROVIDER_ID, AGY_WEBSEARCH_PROVIDER_NAME, buildWebSearchPrompt, executeAgyWebSearch, parseAgyWebSearchOutput, registerV2WebSearch, resolveWebSearchConfig } from "./v2-websearch";
 export declare function resolveModelVariants(modelId: string): OpenCodeV2ModelVariant[];
-/**
- * Ingests a Code Assist `:fetchAvailableModels` payload, updating live `MODEL_PLACEHOLDER_M*`
- * enums and registering any newly available `agy` models or tier variants.
- * Returns `true` if any new models or tier variants were added.
- */
-export declare function ingestAvailableModelsResponse(payload: unknown): boolean;
-/**
- * Native OpenCode v2 setup for the `google-agy` Antigravity CLI OAuth provider.
- */
 export declare function setupOpenCodeV2(ctx: OpenCodeV2PluginContext): Promise<OpenCodeV2Cleanup>;
 export declare const v2PluginDefinition: OpenCodeV2PluginDefinition;
-export declare const createV2PluginDefinition: () => OpenCodeV2PluginDefinition;
+export declare function createV2PluginDefinition(): OpenCodeV2PluginDefinition;
+export { AGY_ACP_PACKAGE, AGY_AISDK_PACKAGE, AGY_PROVIDER_ID, AGY_PROVIDER_NAME, AGY_WEBSEARCH_PROVIDER_ID, AGY_WEBSEARCH_PROVIDER_NAME, STATIC_MODELS_SIMPLE, TIER_MAPPING, buildWebSearchPrompt, executeAgyWebSearch, parseAgyWebSearchOutput, registerV2WebSearch, resolveModelTier, resolveWebSearchConfig, };
+export default v2PluginDefinition;

@@ -1,515 +1,380 @@
-import { AGY_CODE_ASSIST_ENDPOINT, AGY_PROVIDER_ID } from "../constants";
-import { agyFetch } from "../fetch";
+import {
+  AGY_ACP_PACKAGE,
+  AGY_AISDK_PACKAGE,
+  AGY_HEADER_FORK_SOURCE,
+  AGY_HEADER_REQUEST_KIND,
+  AGY_HEADER_SESSION_ID,
+  AGY_PROVIDER_ID,
+  AGY_PROVIDER_NAME,
+} from "../constants";
+import {
+  AgyAuthController,
+  probeAgyAuthAndCatalog,
+  registerAgyIntegration,
+  resolveEffectiveSpawnConfig,
+  syncIntegrationConnectionStatus,
+} from "../acp/auth";
+import { AgyCatalogStore, toOpenCodeModelInfo } from "../acp/catalog";
+import { AcpClientPool } from "../acp/client";
+import { createAgyAcpSdk } from "../acp/language-model";
+import { AgySessionManager } from "../acp/sessions";
 import {
   STATIC_MODELS_SIMPLE,
   TIER_MAPPING,
-  getEffectiveTierMapping,
-  registerDynamicTierVariant,
-  resetDynamicTierMappingsForTesting,
+  getStaticModelEfforts,
   resolveModelTier,
-  type SimpleStaticModel,
 } from "./tier";
 import {
   defineOpenCodeV2Plugin,
-  type OAuthAuthDetails,
   type OpenCodeV2Cleanup,
-  type OpenCodeV2ModelInfo,
   type OpenCodeV2ModelVariant,
-  type OpenCodeV2OAuthCredential,
   type OpenCodeV2PluginContext,
   type OpenCodeV2PluginDefinition,
-  type OpenCodeV2ProviderInfo,
-  type PluginClient,
+  type OpenCodeV2Registration,
+  type OpenCodeV2SessionContextEvent,
+  type OpenCodeV2SessionInfo,
+  type OpenCodeV2SessionRetryEvent,
 } from "./types";
-import { authorizeAgy, exchangeAgyWithVerifier } from "../sdk/oauth";
-import { parseOAuthCallbackInput } from "./oauth-authorize";
-import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from "./auth";
-import { ensureProjectContext } from "./project";
-import { resolveConfiguredProjectId } from "./provider";
-import { refreshAccessToken } from "./token";
 import {
-  loadStoredAuthFromJson,
-  saveStoredAuthToJson,
-  setStoredAuthOverrideForTesting,
-} from "./v2-storage";
-import { registerV2SessionHooks, resolveActiveOAuthCredential } from "./v2-session";
-import { registerV2WebSearch, resolveWebSearchConfig } from "./v2-websearch";
-import { initDiskSignatureCache, getDiskSignatureCache, resetDiskSignatureCacheForTesting } from "./cache";
-import { initTurnStateTracker, shutdownTurnStateTracker } from "../sdk/request";
-import { registerDynamicModelEnum, resetDynamicModelEnumsForTesting } from "../sdk/request/prepare";
-import { buildAgyCliUserAgent } from "../sdk/user-agent";
-import { initCooldownPersistence, shutdownRetryCooldowns } from "../sdk/retry";
-import { executeAgyWebSearch, parseAgyWebSearchPayload } from "../sdk/websearch";
+  AGY_WEBSEARCH_PROVIDER_ID,
+  AGY_WEBSEARCH_PROVIDER_NAME,
+  buildWebSearchPrompt,
+  executeAgyWebSearch,
+  parseAgyWebSearchOutput,
+  registerV2WebSearch,
+  resolveWebSearchConfig,
+} from "./v2-websearch";
 
-export { getSafeHeader, setSafeHeaders, toUrlString } from "./headers";
-export { STATIC_MODELS_SIMPLE, TIER_MAPPING, resolveModelTier, type SimpleStaticModel } from "./tier";
-export { getDiskSignatureCache, resetDiskSignatureCacheForTesting } from "./cache";
-export { registerV2WebSearch, resolveWebSearchConfig } from "./v2-websearch";
-export { executeAgyWebSearch, parseAgyWebSearchPayload } from "../sdk/websearch";
-export {
-  loadStoredAuthFromJson,
-  saveStoredAuthToJson,
-  setStoredAuthOverrideForTesting,
-} from "./v2-storage";
-
-const GOOGLE_PROVIDER_PACKAGE = "@opencode/ai/providers/google";
-const OAUTH_METHOD_ID = "oauth";
-
-const persistAuthClient: PluginClient = {
-  auth: {
-    async set({ body }) {
-      try {
-        saveStoredAuthToJson(body);
-      } catch {
-        // Best-effort sync to auth.json for helper scripts
-      }
-    },
-  },
-};
-
-const ORDERED_TIERS = ["minimal", "low", "medium", "high", "xhigh"] as const;
-const TIER_SUFFIX_REGEX = /^(.+)-(minimal|low|medium|high|xhigh)$/;
-
-const dynamicModels = new Map<string, SimpleStaticModel>();
-
-export function resetDynamicModelsForTesting(): void {
-  dynamicModels.clear();
-  resetDynamicTierMappingsForTesting();
-  resetDynamicModelEnumsForTesting();
-}
+const DEFAULT_WATCHDOG_TIMEOUT_MS = 45_000;
+const MAX_RETRY_ATTEMPTS = 4;
 
 export function resolveModelVariants(modelId: string): OpenCodeV2ModelVariant[] {
-  const mapping = getEffectiveTierMapping(modelId);
-  if (!mapping) return [];
+  const efforts = getStaticModelEfforts(modelId);
+  return efforts.map((level) => ({
+    id: level,
+    settings: {
+      effort: level,
+      thoughtLevel: level,
+    },
+    headers: {
+      "x-agy-tier": level,
+    },
+  }));
+}
 
-  const variants: OpenCodeV2ModelVariant[] = [];
-
-  for (const tier of ORDERED_TIERS) {
-    if (mapping[tier] !== undefined) {
-      variants.push({
-        id: tier,
-        headers: { "x-agy-tier": tier },
-      });
-    }
+function trackRegistration(
+  reg: Promise<OpenCodeV2Registration> | OpenCodeV2Registration | void,
+  cleanups: Array<() => Promise<void> | void>,
+): Promise<void> | void {
+  if (!reg) return;
+  if (typeof (reg as Promise<OpenCodeV2Registration>).then === "function") {
+    return (reg as Promise<OpenCodeV2Registration>).then((resolved) => {
+      if (resolved && typeof resolved.dispose === "function") {
+        cleanups.push(() => resolved.dispose());
+      }
+    });
   }
-
-  return variants;
+  if (typeof (reg as OpenCodeV2Registration).dispose === "function") {
+    cleanups.push(() => (reg as OpenCodeV2Registration).dispose());
+  }
 }
 
-interface RawAvailableModelEntry {
-  displayName?: string;
-  maxTokens?: number;
-  maxOutputTokens?: number;
-  model?: string;
-  disabled?: boolean;
-  supportsImages?: boolean;
-  supportsThinking?: boolean;
-}
-
-function shouldSkipInternalModel(modelId: string, entry?: RawAvailableModelEntry): boolean {
-  if (!modelId || entry?.disabled === true) return true;
+function extractRetryDelayFromStructuredError(
+  event: OpenCodeV2SessionRetryEvent,
+): number | undefined {
   if (
-    modelId.startsWith("chat_") ||
-    modelId.startsWith("tab_") ||
-    modelId.endsWith("-tiered") ||
-    modelId.endsWith("-disabled") ||
-    modelId.includes("-image") ||
-    modelId === "gemini-2.5-flash-thinking"
+    typeof event.error.retryAfterMs === "number" &&
+    Number.isFinite(event.error.retryAfterMs) &&
+    event.error.retryAfterMs > 0
   ) {
-    return true;
+    return Math.min(event.error.retryAfterMs, 120_000);
   }
-  return false;
-}
 
-/**
- * Ingests a Code Assist `:fetchAvailableModels` payload, updating live `MODEL_PLACEHOLDER_M*`
- * enums and registering any newly available `agy` models or tier variants.
- * Returns `true` if any new models or tier variants were added.
- */
-export function ingestAvailableModelsResponse(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  const record = payload as {
-    models?: Record<string, RawAvailableModelEntry>;
-    agentModelSorts?: Array<{ groups?: Array<{ modelIds?: string[] }> }>;
-  };
-
-  const modelsMap = record.models && typeof record.models === "object" ? record.models : {};
-  for (const [modelId, entry] of Object.entries(modelsMap)) {
-    if (entry && typeof entry.model === "string") {
-      registerDynamicModelEnum(modelId, entry.model);
+  const body = event.error.response?.body ?? event.error.message ?? "";
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { retryAfterMs?: number; quotaResetTimeStamp?: string };
+    };
+    if (typeof parsed.error?.retryAfterMs === "number" && parsed.error.retryAfterMs > 0) {
+      return Math.min(parsed.error.retryAfterMs, 120_000);
     }
-  }
-
-  const candidateIds = new Set<string>();
-  if (Array.isArray(record.agentModelSorts)) {
-    for (const sort of record.agentModelSorts) {
-      for (const group of sort?.groups ?? []) {
-        for (const id of group?.modelIds ?? []) {
-          if (typeof id === "string") candidateIds.add(id);
+    if (typeof parsed.error?.quotaResetTimeStamp === "string") {
+      const resetAt = Date.parse(parsed.error.quotaResetTimeStamp);
+      if (Number.isFinite(resetAt)) {
+        const delta = resetAt - Date.now();
+        if (delta > 0 && delta <= 120_000) {
+          return Math.round(delta);
         }
       }
     }
-  }
-  for (const id of Object.keys(modelsMap)) {
-    candidateIds.add(id);
+  } catch {
+    // Ignore non-JSON body
   }
 
-  // Count tier siblings so standalone models like `gpt-oss-120b-medium` stay standalone
-  const tierSiblingCounts = new Map<string, number>();
-  for (const id of candidateIds) {
-    const entry = modelsMap[id];
-    if (shouldSkipInternalModel(id, entry)) continue;
-    const match = id.match(TIER_SUFFIX_REGEX);
-    if (match?.[1] && !STATIC_MODELS_SIMPLE[id]) {
-      tierSiblingCounts.set(match[1], (tierSiblingCounts.get(match[1]) ?? 0) + 1);
+  const secMatch = body.match(/retry(?:\s+in|\s+after|Delay=)\s*([0-9.]+)(ms|s)\b/i);
+  if (secMatch?.[1] && secMatch[2]) {
+    const num = Number(secMatch[1]);
+    if (Number.isFinite(num) && num > 0) {
+      const ms = secMatch[2].toLowerCase() === "ms" ? num : num * 1000;
+      return Math.min(Math.round(ms), 120_000);
     }
   }
 
-  let changed = false;
+  return undefined;
+}
 
-  for (const id of candidateIds) {
-    const entry = modelsMap[id];
-    if (shouldSkipInternalModel(id, entry)) continue;
+export async function setupOpenCodeV2(
+  ctx: OpenCodeV2PluginContext,
+): Promise<OpenCodeV2Cleanup> {
+  const cleanups: Array<() => Promise<void> | void> = [];
 
-    // If explicitly registered as a standalone static model, keep it standalone
-    if (STATIC_MODELS_SIMPLE[id]) {
-      continue;
-    }
+  const pool = new AcpClientPool();
+  const catalog = new AgyCatalogStore();
+  await catalog.hydrateFromStorage(ctx.storage);
 
-    const match = id.match(TIER_SUFFIX_REGEX);
-    const baseId = match?.[1];
-    const tier = match?.[2];
-    const isGroupedTieredModel =
-      Boolean(baseId && tier) &&
-      (Boolean(baseId && (STATIC_MODELS_SIMPLE[baseId] || TIER_MAPPING[baseId])) ||
-        (baseId ? (tierSiblingCounts.get(baseId) ?? 0) >= 2 : false));
+  let currentSpawnConfig = await resolveEffectiveSpawnConfig(ctx);
+  const auth = new AgyAuthController(currentSpawnConfig);
+  await auth.hydrateFromStorage(ctx.storage, currentSpawnConfig);
 
-    if (isGroupedTieredModel && baseId && tier) {
-      if (registerDynamicTierVariant(baseId, tier, id)) {
-        changed = true;
+  const sessions = new AgySessionManager({
+    pool,
+    catalog,
+    getSpawnConfig: async () => {
+      currentSpawnConfig = await resolveEffectiveSpawnConfig(ctx);
+      return currentSpawnConfig;
+    },
+    getToolMode: () => (ctx.options?.toolMode === "hybrid" ? "hybrid" : "opencode"),
+    getWatchdogTimeoutMs: () =>
+      typeof ctx.options?.watchdogTimeoutMs === "number"
+        ? ctx.options.watchdogTimeoutMs
+        : DEFAULT_WATCHDOG_TIMEOUT_MS,
+    storage: ctx.storage,
+    permission: ctx.permission,
+    onAuthFailure: (message) => {
+      if (auth.updateFromOutcome({ state: "needs_auth", message })) {
+        void auth.persistToStorage(ctx.storage, currentSpawnConfig);
+        void syncIntegrationConnectionStatus(ctx, auth);
+        void ctx.provider?.reload?.()?.catch(() => {});
       }
-      if (!STATIC_MODELS_SIMPLE[baseId] && !dynamicModels.has(baseId)) {
-        const cleanName = (entry?.displayName || baseId)
-          .replace(/\s*\((Minimal|Low|Medium|High|XHigh)\)\s*$/i, "")
-          .trim();
-        dynamicModels.set(baseId, {
-          name: cleanName || baseId,
-          description: `${cleanName || baseId} model. Select tier at runtime.`,
-          maxTokens: typeof entry?.maxTokens === "number" ? entry.maxTokens : 1048576,
-          maxOutputTokens: typeof entry?.maxOutputTokens === "number" ? entry.maxOutputTokens : 65536,
-          toolCall: true,
-          reasoning: entry?.supportsThinking ?? true,
-          attachment: entry?.supportsImages ?? !baseId.startsWith("gpt-"),
+    },
+  });
+
+  const refreshProbeAndReload = async (): Promise<void> => {
+    if (auth.isDisposed) return;
+    currentSpawnConfig = await resolveEffectiveSpawnConfig(ctx);
+    const outcome = await probeAgyAuthAndCatalog(pool, currentSpawnConfig);
+    if (auth.isDisposed) return;
+
+    const authChanged = auth.updateFromOutcome(outcome);
+    await auth.persistToStorage(ctx.storage, currentSpawnConfig);
+    let catalogChanged = false;
+    if (outcome.state === "ready" && outcome.catalog) {
+      catalogChanged = await catalog.applyDiscoveredCatalog(
+        outcome.catalog,
+        ctx.storage,
+      );
+    }
+
+    await syncIntegrationConnectionStatus(ctx, auth);
+
+    if ((authChanged || catalogChanged) && !auth.isDisposed) {
+      await ctx.provider?.reload?.()?.catch(() => {});
+      await ctx.model?.reload?.()?.catch(() => {});
+    }
+  };
+
+  await registerAgyIntegration(ctx, {
+    auth,
+    getSpawnConfig: () => currentSpawnConfig,
+    onCredentialsChanged: async () => {
+      await pool.evictAll();
+      await refreshProbeAndReload();
+    },
+    cleanups,
+  });
+
+  if (ctx.provider?.transform) {
+    await trackRegistration(
+      ctx.provider.transform((editor) => {
+        editor.update(AGY_PROVIDER_ID, (provider) => {
+          provider.id = AGY_PROVIDER_ID;
+          provider.name = AGY_PROVIDER_NAME;
+          provider.integrationID = AGY_PROVIDER_ID;
+          provider.package = AGY_AISDK_PACKAGE;
+          if (provider.activation !== "disabled") {
+            provider.activation = auth.shouldActivateProvider ? "enabled" : "auto";
+          }
         });
-        changed = true;
-      }
-      continue;
-    }
 
-    // Standalone model not in STATIC_MODELS_SIMPLE
-    if (!dynamicModels.has(id)) {
-      const displayName = entry?.displayName?.trim() || id;
-      dynamicModels.set(id, {
-        name: displayName,
-        description: `${displayName} model via Antigravity CLI.`,
-        maxTokens: typeof entry?.maxTokens === "number" ? entry.maxTokens : 1048576,
-        maxOutputTokens: typeof entry?.maxOutputTokens === "number" ? entry.maxOutputTokens : 65536,
-        toolCall: true,
-        reasoning: entry?.supportsThinking ?? true,
-        attachment: entry?.supportsImages ?? !id.startsWith("gpt-"),
-      });
-      changed = true;
-    }
-  }
-
-  return changed;
-}
-
-function resolveModelFamily(modelId: string): string {
-  if (modelId.startsWith("claude-")) return "claude";
-  if (modelId.startsWith("gpt-")) return "gpt";
-  return "gemini";
-}
-
-function resolveInputModalities(modelId: string, simple: SimpleStaticModel): string[] {
-  if (!simple.attachment) {
-    return ["text"];
-  }
-  const isClaude = modelId.startsWith("claude-");
-  const isGpt = modelId.startsWith("gpt-");
-  if (!isClaude && !isGpt) {
-    return ["text", "image", "pdf", "audio", "video"];
-  }
-  return ["text", "image", "pdf"];
-}
-
-function applyProviderInfo(provider: OpenCodeV2ProviderInfo): void {
-  provider.id = AGY_PROVIDER_ID;
-  provider.name = provider.name && provider.name !== AGY_PROVIDER_ID ? provider.name : "Antigravity CLI";
-  provider.activation = "auto";
-  provider.package = GOOGLE_PROVIDER_PACKAGE;
-  provider.integrationID = AGY_PROVIDER_ID;
-}
-
-function applyModelInfo(model: OpenCodeV2ModelInfo, modelId: string, simple: SimpleStaticModel): void {
-  model.id = modelId;
-  model.modelID = modelId;
-  model.providerID = AGY_PROVIDER_ID;
-  model.name = model.name && model.name !== modelId ? model.name : simple.name;
-  model.family = resolveModelFamily(modelId);
-  model.package = GOOGLE_PROVIDER_PACKAGE;
-  model.capabilities = {
-    tools: simple.toolCall,
-    input: resolveInputModalities(modelId, simple),
-    output: ["text"],
-    temperature: true,
-  };
-  model.limit = {
-    context: simple.maxTokens,
-    output: simple.maxOutputTokens,
-  };
-  model.cost = Array.isArray(model.cost) ? model.cost : [];
-  model.variants = resolveModelVariants(modelId);
-  model.status = "active";
-  model.enabled = model.enabled ?? true;
-  model.time = model.time ?? { released: 0 };
-}
-
-/**
- * Native OpenCode v2 setup for the `google-agy` Antigravity CLI OAuth provider.
- */
-export async function setupOpenCodeV2(ctx: OpenCodeV2PluginContext): Promise<OpenCodeV2Cleanup> {
-  try {
-    initDiskSignatureCache({
-      enabled: true,
-      memory_ttl_seconds: 3600,
-      disk_ttl_seconds: 86400,
-      write_interval_seconds: 30,
-    });
-  } catch (e) {
-    console.warn(
-      `[Agy Auth] initDiskSignatureCache failed, running without signature disk cache: ${e instanceof Error ? e.message : e}`,
-    );
-  }
-
-  try {
-    initTurnStateTracker();
-  } catch (e) {
-    console.warn(
-      `[Agy Auth] initTurnStateTracker failed, running without turn-state tracking: ${e instanceof Error ? e.message : e}`,
-    );
-  }
-
-  try {
-    initCooldownPersistence();
-  } catch (e) {
-    console.warn(
-      `[Agy Auth] initCooldownPersistence failed, running without cooldown disk persistence: ${e instanceof Error ? e.message : e}`,
-    );
-  }
-
-  const getConfiguredProjectId = () =>
-    resolveConfiguredProjectId({
-      configProjectId: typeof ctx.options?.projectId === "string" ? ctx.options.projectId : undefined,
-    });
-
-  // 1. Register Google Antigravity OAuth integration (authorize + native token refresh + account label)
-  await ctx.integration.transform((editor) => {
-    if (!editor) return;
-
-    editor.update(AGY_PROVIDER_ID, (integration) => {
-      integration.name = "Antigravity CLI";
-    });
-
-    editor.method.update({
-      integrationID: AGY_PROVIDER_ID,
-      method: {
-        id: OAUTH_METHOD_ID,
-        type: "oauth",
-        label: "Sign in with Google (Antigravity CLI)",
-      },
-      label: (credential) =>
-        typeof credential.metadata?.email === "string" ? credential.metadata.email : undefined,
-      authorize: async () => {
-        const authorization = await authorizeAgy();
-
-        return {
-          mode: "code",
-          url: authorization.url,
-          instructions:
-            "Complete Google sign-in in your browser. After authorization redirects to https://antigravity.google/oauth-callback?code=..., copy the full redirect URL (or code parameter) and paste it below:",
-          callback: async (rawInput: string): Promise<OpenCodeV2OAuthCredential> => {
-            const parsed = parseOAuthCallbackInput(rawInput);
-            if (!parsed.code) {
-              throw new Error("Missing authorization code in callback input.");
-            }
-            if (parsed.state && parsed.state !== authorization.state) {
-              throw new Error("OAuth state mismatch in callback input.");
-            }
-
-            const exchangeResult = await exchangeAgyWithVerifier(parsed.code, authorization.verifier);
-            if (exchangeResult.type !== "success") {
-              throw new Error(exchangeResult.error || "Google OAuth token exchange failed.");
-            }
-
-            const initialRefresh = formatRefreshParts({
-              refreshToken: exchangeResult.refresh,
-            });
-
-            let authRecord: OAuthAuthDetails = {
-              type: "oauth",
-              refresh: initialRefresh,
-              access: exchangeResult.access,
-              expires: Math.max(0, Math.floor(exchangeResult.expires)),
-            };
-
-            try {
-              const projectContext = await ensureProjectContext(
-                authRecord,
-                persistAuthClient,
-                getConfiguredProjectId(),
-              );
-              authRecord = {
-                ...authRecord,
-                refresh: projectContext.auth.refresh,
-              };
-            } catch (error) {
-              const msg = error instanceof Error ? error.message : String(error);
-              console.warn(`[Agy Auth] Deferred project binding until first request: ${msg}`);
-            }
-
-            try {
-              saveStoredAuthToJson(authRecord);
-            } catch {
-              // Non-fatal: OpenCode v2 persists credentials natively in Credential.Service
-            }
-
-            void syncAvailableModels(authRecord);
-
-            return {
-              type: "oauth",
-              methodID: OAUTH_METHOD_ID,
-              refresh: authRecord.refresh,
-              access: authRecord.access,
-              expires: Math.max(0, Math.floor(authRecord.expires)),
-              ...(exchangeResult.email ? { metadata: { email: exchangeResult.email } } : {}),
-            };
-          },
-        };
-      },
-      refresh: async (credential): Promise<OpenCodeV2OAuthCredential> => {
-        const refreshed = await refreshAccessToken(
-          {
-            type: "oauth",
-            refresh: credential.refresh,
-            access: credential.access,
-            expires: credential.expires,
-            metadata: credential.metadata,
-          },
-          persistAuthClient,
-        );
-
-        if (!refreshed) {
-          throw new Error(
-            "Failed to refresh Google Antigravity OAuth token. Reconnect the Antigravity CLI integration.",
-          );
+        for (const entry of catalog.listEntries()) {
+          const modelInfo = toOpenCodeModelInfo(entry);
+          editor.models.update(AGY_PROVIDER_ID, modelInfo.id, (draft) => {
+            Object.assign(draft, modelInfo);
+          });
         }
+      }),
+      cleanups,
+    );
+  }
 
-        try {
-          saveStoredAuthToJson(refreshed);
-        } catch {
-          // Non-fatal: OpenCode v2 persists refreshed credentials natively
-        }
-
-        return {
-          type: "oauth",
-          methodID: credential.methodID || OAUTH_METHOD_ID,
-          refresh: refreshed.refresh,
-          access: refreshed.access,
-          expires: Math.max(0, Math.floor(refreshed.expires)),
-          ...(credential.metadata ? { metadata: credential.metadata } : {}),
-        };
-      },
-    });
-  });
-
-  // 2. Register google-agy provider and its static + dynamically discovered model catalog
-  await ctx.provider.transform((editor) => {
-    if (!editor) return;
-
-    editor.update(AGY_PROVIDER_ID, applyProviderInfo);
-
-    for (const [modelId, simple] of Object.entries(STATIC_MODELS_SIMPLE)) {
-      editor.models.update(AGY_PROVIDER_ID, modelId, (model) => {
-        applyModelInfo(model, modelId, simple);
-      });
-    }
-
-    for (const [modelId, simple] of dynamicModels.entries()) {
-      editor.models.update(AGY_PROVIDER_ID, modelId, (model) => {
-        applyModelInfo(model, modelId, simple);
-      });
-    }
-  });
-
-  // 3. Register session HTTP request/response rewriting and quota-aware retry hooks
-  await registerV2SessionHooks(ctx, { getConfiguredProjectId });
-
-  // 4. Register Antigravity grounded web search provider (enabled by default; opt-out via options.webSearch: false)
-  const disposeWebSearch = await registerV2WebSearch(ctx, { getConfiguredProjectId });
-
-  let disposed = false;
-
-  async function syncAvailableModels(authOverride?: OAuthAuthDetails): Promise<void> {
-    if (disposed || typeof ctx.provider.reload !== "function") {
-      return;
-    }
-
-    try {
-      let auth = authOverride ?? (await resolveActiveOAuthCredential(ctx.integration));
-      if (!auth?.refresh) return;
-
-      if (!auth.access || accessTokenExpired(auth)) {
-        const refreshed = await refreshAccessToken(auth, persistAuthClient);
-        if (!refreshed) return;
-        auth = refreshed;
-      }
-
-      const parts = parseRefreshParts(auth.refresh);
-      const project = getConfiguredProjectId() || parts.managedProjectId || parts.projectId;
-      if (!project) return;
-
-      const resp = await agyFetch(`${AGY_CODE_ASSIST_ENDPOINT}/v1internal:fetchAvailableModels`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${auth.access}`,
-          "User-Agent": buildAgyCliUserAgent(),
-          "Content-Type": "application/json",
+  if (ctx.aisdk?.hook) {
+    const sdkInstance = createAgyAcpSdk(sessions);
+    await trackRegistration(
+      ctx.aisdk.hook(
+        "sdk",
+        (event) => {
+          if (
+            event.package !== AGY_ACP_PACKAGE &&
+            event.package !== AGY_AISDK_PACKAGE
+          ) {
+            return;
+          }
+          event.sdk = sdkInstance;
         },
-        body: JSON.stringify({ project }),
-      });
-
-      if (!resp.ok || disposed) return;
-      const payload = await resp.json();
-      if (disposed) return;
-
-      const addedNewModelsOrVariants = ingestAvailableModelsResponse(payload);
-      if (addedNewModelsOrVariants && !disposed) {
-        await ctx.provider.reload();
-      }
-    } catch {
-      // Best-effort background catalog refresh; static catalog remains active
-    }
+        { providerID: AGY_PROVIDER_ID },
+      ),
+      cleanups,
+    );
   }
 
-  void syncAvailableModels();
+  const forkSourceCache = new Map<string, string | null>();
+  const resolveForkSource = async (sessionID: string): Promise<string | undefined> => {
+    if (!ctx.session.get) return undefined;
+    if (forkSourceCache.has(sessionID)) {
+      return forkSourceCache.get(sessionID) ?? undefined;
+    }
+    try {
+      const raw = await ctx.session.get({ sessionID });
+      const info: OpenCodeV2SessionInfo | undefined =
+        raw && typeof raw === "object" && "data" in raw
+          ? (raw as { data?: OpenCodeV2SessionInfo }).data
+          : (raw as OpenCodeV2SessionInfo | undefined);
+      const forkId = info?.fork?.sessionID;
+      forkSourceCache.set(sessionID, typeof forkId === "string" ? forkId : null);
+      return typeof forkId === "string" ? forkId : undefined;
+    } catch {
+      forkSourceCache.set(sessionID, null);
+      return undefined;
+    }
+  };
+
+  const attachContextMetadata = (event: OpenCodeV2SessionContextEvent) => {
+    if (event.model.providerID !== AGY_PROVIDER_ID) return;
+    const existing =
+      event.options[AGY_PROVIDER_ID] &&
+      typeof event.options[AGY_PROVIDER_ID] === "object"
+        ? (event.options[AGY_PROVIDER_ID] as Record<string, unknown>)
+        : {};
+    event.options[AGY_PROVIDER_ID] = {
+      ...existing,
+      sessionId: event.sessionID,
+      ...(event.agent ? { agent: event.agent } : {}),
+      ...(event.model.variant && !existing.thoughtLevel
+        ? { thoughtLevel: event.model.variant, effort: event.model.variant }
+        : {}),
+    };
+  };
+
+  await trackRegistration(
+    ctx.session.hook(
+      "model.request",
+      async (event) => {
+        if (event.model.providerID !== AGY_PROVIDER_ID) return;
+        event.headers[AGY_HEADER_SESSION_ID] = event.sessionID;
+        event.headers[AGY_HEADER_REQUEST_KIND] = event.kind;
+        if (event.agent) {
+          event.headers["x-opencode-agy-agent"] = event.agent;
+        }
+        if (event.model.variant && !event.headers["x-agy-tier"]) {
+          event.headers["x-agy-tier"] = event.model.variant;
+        }
+        const forkSource = await resolveForkSource(event.sessionID);
+        if (forkSource) {
+          event.headers[AGY_HEADER_FORK_SOURCE] = forkSource;
+        }
+      },
+      { providerID: AGY_PROVIDER_ID },
+    ),
+    cleanups,
+  );
+
+  await trackRegistration(
+    ctx.session.hook("context", attachContextMetadata, {
+      providerID: AGY_PROVIDER_ID,
+    }),
+    cleanups,
+  );
+
+  await trackRegistration(
+    ctx.session.hook("generate", attachContextMetadata, {
+      providerID: AGY_PROVIDER_ID,
+    }),
+    cleanups,
+  );
+
+  await trackRegistration(
+    ctx.session.hook("compaction", attachContextMetadata, {
+      providerID: AGY_PROVIDER_ID,
+    }),
+    cleanups,
+  );
+
+  await trackRegistration(
+    ctx.session.hook(
+      "retry",
+      (event) => {
+        if (event.model.providerID !== AGY_PROVIDER_ID) return;
+        const status = event.error.status;
+
+        if (status === 400 || status === 401 || status === 403 || status === 404) {
+          event.decision = { retry: false };
+          return;
+        }
+
+        if (event.attempt > MAX_RETRY_ATTEMPTS) {
+          event.decision = { retry: false };
+          return;
+        }
+
+        if (status === 429 || (typeof status === "number" && status >= 500)) {
+          const parsedDelay = extractRetryDelayFromStructuredError(event);
+          const backoffMs =
+            parsedDelay ?? Math.min(1_000 * Math.pow(2, Math.max(0, event.attempt - 1)), 30_000);
+          event.decision = { retry: true, delay: backoffMs };
+        }
+      },
+      { providerID: AGY_PROVIDER_ID },
+    ),
+    cleanups,
+  );
+
+  await registerV2WebSearch(ctx, {
+    pool,
+    getSpawnConfig: () => resolveEffectiveSpawnConfig(ctx),
+    cleanups,
+  });
+
+  const shouldRunInitialProbe =
+    ctx.options?.skipInitialProbe === false ||
+    (ctx.options?.skipInitialProbe !== true &&
+      (!process.env.VITEST ||
+        Boolean(ctx.options?.binaryPath || process.env.OPENCODE_AGY_PATH)));
+
+  let initialProbePromise: Promise<void> | undefined;
+  if (shouldRunInitialProbe) {
+    initialProbePromise = refreshProbeAndReload().catch(() => {});
+  }
 
   return async () => {
-    disposed = true;
-    await disposeWebSearch?.();
-    getDiskSignatureCache()?.shutdown();
-    shutdownTurnStateTracker();
-    shutdownRetryCooldowns();
+    auth.markDisposed();
+    if (initialProbePromise) {
+      await initialProbePromise.catch(() => {});
+    }
+    for (const cleanup of cleanups.reverse()) {
+      await Promise.resolve(cleanup()).catch(() => {});
+    }
+    await sessions.dispose();
+    await pool.dispose();
   };
 }
 
@@ -518,4 +383,25 @@ export const v2PluginDefinition: OpenCodeV2PluginDefinition = defineOpenCodeV2Pl
   setup: setupOpenCodeV2,
 });
 
-export const createV2PluginDefinition = (): OpenCodeV2PluginDefinition => v2PluginDefinition;
+export function createV2PluginDefinition(): OpenCodeV2PluginDefinition {
+  return v2PluginDefinition;
+}
+
+export {
+  AGY_ACP_PACKAGE,
+  AGY_AISDK_PACKAGE,
+  AGY_PROVIDER_ID,
+  AGY_PROVIDER_NAME,
+  AGY_WEBSEARCH_PROVIDER_ID,
+  AGY_WEBSEARCH_PROVIDER_NAME,
+  STATIC_MODELS_SIMPLE,
+  TIER_MAPPING,
+  buildWebSearchPrompt,
+  executeAgyWebSearch,
+  parseAgyWebSearchOutput,
+  registerV2WebSearch,
+  resolveModelTier,
+  resolveWebSearchConfig,
+};
+
+export default v2PluginDefinition;

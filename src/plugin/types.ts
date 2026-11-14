@@ -1,70 +1,10 @@
-export interface OAuthAuthDetails {
-  type: "oauth";
-  refresh: string;
-  access: string;
-  expires: number;
-  metadata?: Record<string, unknown>;
-}
-
-export interface ApiKeyAuthDetails {
-  type: "api" | "key";
-  key?: string;
-}
-
-export type AuthDetails = OAuthAuthDetails | ApiKeyAuthDetails | { type: string; [key: string]: unknown };
-export type GetAuth = () => Promise<AuthDetails>;
-
-export interface Provider {
-  id?: string;
-  options?: {
-    projectId?: string;
-    thinkingConfig?: unknown;
-    [key: string]: unknown;
-  };
-  settings?: {
-    projectId?: string;
-    thinkingConfig?: unknown;
-    [key: string]: unknown;
-  };
-  models?: Record<string, Record<string, unknown>>;
-  [key: string]: unknown;
-}
-
-export interface Config {
-  provider?: Record<
-    string,
-    {
-      options?: { projectId?: string; [key: string]: unknown };
-      settings?: { projectId?: string; [key: string]: unknown };
-      [key: string]: unknown;
-    }
-  >;
-  [key: string]: unknown;
-}
-
-export interface PluginClient {
-  auth: {
-    set(input: { path: { id: string }; body: OAuthAuthDetails }): Promise<unknown>;
-  };
-  config?: {
-    get?: () => Promise<{ data?: Config }>;
-  };
-}
-
-export interface RefreshParts {
-  refreshToken: string;
-  projectId?: string;
-  managedProjectId?: string;
-}
-
-export interface ProjectContextResult {
-  auth: OAuthAuthDetails;
-  effectiveProjectId: string;
-}
+import type { LanguageModelV3 } from "../acp/types";
 
 // ============================================================================
-// OpenCode v2 Native Promise Plugin Contracts (@opencode/plugin compatible)
+// OpenCode v2 Native Promise Plugin Contracts (@opencode/plugin v2.3+ compatible)
 // ============================================================================
+
+export type AgyToolMode = "opencode" | "hybrid";
 
 export interface OpenCodeV2Registration {
   readonly dispose: () => Promise<void>;
@@ -143,79 +83,177 @@ export interface OpenCodeV2ProviderRecord {
 }
 
 export interface OpenCodeV2ProviderEditor {
-  list(): readonly OpenCodeV2ProviderRecord[];
-  get(providerID: string): OpenCodeV2ProviderRecord | undefined;
-  add(input: {
+  list?(): readonly OpenCodeV2ProviderRecord[];
+  get?(providerID: string): OpenCodeV2ProviderRecord | undefined;
+  add?(input: {
     info: OpenCodeV2ProviderInfo;
     models: readonly OpenCodeV2ModelInfo[];
     sourceConnection?: OpenCodeV2ConnectionInfo;
   }): void;
   update(providerID: string, update: (provider: OpenCodeV2ProviderInfo) => void): void;
-  remove(providerID: string): void;
+  remove?(providerID: string): void;
   readonly models: {
-    set(providerID: string, models: readonly OpenCodeV2ModelInfo[]): void;
+    set?(providerID: string, models: readonly OpenCodeV2ModelInfo[]): void;
     update(providerID: string, modelID: string, update: (model: OpenCodeV2ModelInfo) => void): void;
-    remove(providerID: string, modelID: string): void;
+    remove?(providerID: string, modelID: string): void;
   };
 }
 
+export interface OpenCodeV2ProviderDomain extends OpenCodeV2TransformRegistry<OpenCodeV2ProviderEditor> {
+  readonly get?: (input: { providerID: string }) => Promise<{ data?: OpenCodeV2ProviderInfo } | undefined>;
+}
+
 export interface OpenCodeV2ModelEditor {
-  list(): readonly OpenCodeV2ModelInfo[];
+  list(providerID?: string): readonly OpenCodeV2ModelInfo[];
   get(providerID: string, modelID: string): OpenCodeV2ModelInfo | undefined;
   update(providerID: string, modelID: string, update: (model: OpenCodeV2ModelInfo) => void): void;
   remove(providerID: string, modelID: string): void;
 }
 
-export interface OpenCodeV2OAuthCredential {
-  type: "oauth";
-  methodID: string;
-  refresh: string;
-  access: string;
-  expires: number;
-  metadata?: Record<string, unknown>;
+export interface OpenCodeV2ConnectionStatus {
+  readonly status: "needs_auth";
+  readonly message: string;
+  readonly url?: string;
 }
 
 export interface OpenCodeV2ConnectionInfo {
-  readonly id: string;
+  readonly id?: string;
+  readonly type?: "credential" | "env" | string;
+  readonly method?: string;
   readonly integrationID?: string;
   readonly label?: string;
+  readonly status?: OpenCodeV2ConnectionStatus;
   readonly [key: string]: unknown;
 }
 
-export interface OpenCodeV2OAuthAuthorization {
-  readonly url: string;
-  readonly instructions: string;
-  readonly expiresAt?: number;
-  readonly mode: "code";
-  readonly callback: (code: string) => Promise<OpenCodeV2OAuthCredential>;
+export interface OpenCodeV2ExternalCredential {
+  readonly type: "external";
+  readonly methodID: string;
+  readonly metadata?: Record<string, unknown>;
 }
 
-export interface OpenCodeV2OAuthMethodRegistration {
-  readonly integrationID: string;
-  readonly method: {
-    readonly id: string;
-    readonly type: "oauth";
-    readonly label: string;
-  };
-  readonly authorize: (answer?: Record<string, unknown>) => Promise<OpenCodeV2OAuthAuthorization>;
-  readonly refresh?: (credential: OpenCodeV2OAuthCredential) => Promise<OpenCodeV2OAuthCredential>;
-  readonly label?: (credential: OpenCodeV2OAuthCredential) => string | undefined;
+export interface OpenCodeV2KeyCredential {
+  readonly type: "key";
+  readonly key: string;
+  readonly metadata?: Record<string, unknown>;
 }
+
+export interface OpenCodeV2OAuthCredential {
+  readonly type: "oauth";
+  readonly methodID: string;
+  readonly refresh: string;
+  readonly access: string;
+  readonly expires: number;
+  readonly metadata?: Record<string, unknown>;
+}
+
+export type OpenCodeV2CredentialValue =
+  | OpenCodeV2ExternalCredential
+  | OpenCodeV2KeyCredential
+  | OpenCodeV2OAuthCredential
+  | { readonly type: string; readonly [key: string]: unknown };
+
+export interface OpenCodeV2FormField {
+  readonly key: string;
+  readonly type: "string" | "boolean";
+  readonly title: string;
+  readonly description?: string;
+  readonly required?: boolean;
+  readonly placeholder?: string;
+}
+
+export interface OpenCodeV2IntegrationCommandMethod {
+  readonly id: string;
+  readonly type: "command";
+  readonly label: string;
+  readonly command: ReadonlyArray<string>;
+}
+
+export interface OpenCodeV2IntegrationExternalMethod {
+  readonly id: string;
+  readonly type: "external";
+  readonly label: string;
+  readonly form?: ReadonlyArray<OpenCodeV2FormField>;
+}
+
+export interface OpenCodeV2IntegrationEnvMethod {
+  readonly type: "env";
+  readonly names: ReadonlyArray<string>;
+}
+
+export type OpenCodeV2IntegrationMethod =
+  | OpenCodeV2IntegrationCommandMethod
+  | OpenCodeV2IntegrationExternalMethod
+  | OpenCodeV2IntegrationEnvMethod;
+
+export type OpenCodeV2IntegrationMethodRegistration =
+  | {
+      readonly integrationID: string;
+      readonly method: OpenCodeV2IntegrationCommandMethod;
+    }
+  | {
+      readonly integrationID: string;
+      readonly method: OpenCodeV2IntegrationExternalMethod;
+    }
+  | {
+      readonly integrationID: string;
+      readonly method: OpenCodeV2IntegrationEnvMethod;
+    };
 
 export interface OpenCodeV2IntegrationEditor {
+  list?(): readonly { id: string; name: string }[];
+  get?(id: string): { id: string; name: string } | undefined;
   update(id: string, update: (integration: { id: string; name: string }) => void): void;
+  remove?(id: string): void;
   readonly method: {
-    update(input: OpenCodeV2OAuthMethodRegistration): void;
+    list?(integrationID: string): readonly OpenCodeV2IntegrationMethod[];
+    update(input: OpenCodeV2IntegrationMethodRegistration): void;
+    remove?(integrationID: string, method: OpenCodeV2IntegrationMethod): void;
   };
 }
 
-export interface OpenCodeV2IntegrationDomain extends OpenCodeV2TransformRegistry<OpenCodeV2IntegrationEditor> {
+export interface OpenCodeV2IntegrationDomain
+  extends OpenCodeV2TransformRegistry<OpenCodeV2IntegrationEditor> {
   readonly connection?: {
     readonly active: (integrationID: string) => Promise<OpenCodeV2ConnectionInfo | undefined>;
-    readonly resolve: (
+    readonly resolve?: (
       connection: OpenCodeV2ConnectionInfo,
-    ) => Promise<OpenCodeV2OAuthCredential | { type: string; [key: string]: unknown } | undefined>;
+    ) => Promise<OpenCodeV2CredentialValue | undefined>;
+    readonly status?: (input: {
+      readonly integrationID: string;
+      readonly connection: OpenCodeV2ConnectionInfo;
+      readonly status: OpenCodeV2ConnectionStatus | undefined;
+    }) => Promise<void>;
   };
+}
+
+export interface OpenCodeV2AISDKSdkHookEvent {
+  readonly model: OpenCodeV2ModelInfo;
+  readonly package: string;
+  readonly options: Record<string, unknown>;
+  sdk?: {
+    languageModel: (modelId: string) => LanguageModelV3;
+  };
+}
+
+export interface OpenCodeV2AISDKLanguageHookEvent {
+  readonly model: OpenCodeV2ModelInfo;
+  readonly sdk: unknown;
+  readonly options: Record<string, unknown>;
+  language?: LanguageModelV3;
+}
+
+export interface OpenCodeV2AISDKHooks {
+  readonly sdk: OpenCodeV2AISDKSdkHookEvent;
+  readonly language: OpenCodeV2AISDKLanguageHookEvent;
+}
+
+export interface OpenCodeV2AISDKDomain {
+  readonly hook: <K extends keyof OpenCodeV2AISDKHooks>(
+    name: K,
+    handler: (event: OpenCodeV2AISDKHooks[K]) => Promise<void> | void,
+    options?: { readonly providerID?: string },
+  ) => Promise<OpenCodeV2Registration> | OpenCodeV2Registration | void;
 }
 
 export interface OpenCodeV2ModelRef {
@@ -226,21 +264,28 @@ export interface OpenCodeV2ModelRef {
 
 export type OpenCodeV2SessionRequestKind = "primary" | "compaction" | "title" | "generate";
 
-export interface OpenCodeV2SessionHttpRequest {
-  readonly sessionID: string;
-  readonly agent: string;
-  readonly model: OpenCodeV2ModelRef;
-  readonly kind: OpenCodeV2SessionRequestKind;
-  request: Request;
+export interface OpenCodeV2SystemPart {
+  readonly type?: string;
+  readonly text: string;
+  readonly metadata?: Record<string, unknown>;
 }
 
-export interface OpenCodeV2SessionHttpResponse {
+export interface OpenCodeV2SessionContextEvent {
+  readonly sessionID: string;
+  readonly agent?: string;
+  readonly model: OpenCodeV2ModelRef;
+  system: OpenCodeV2SystemPart[];
+  messages: unknown[];
+  options: Record<string, unknown>;
+}
+
+export interface OpenCodeV2SessionModelRequestEvent {
   readonly sessionID: string;
   readonly agent: string;
   readonly model: OpenCodeV2ModelRef;
   readonly kind: OpenCodeV2SessionRequestKind;
-  readonly request: Request;
-  response: Response;
+  baseURL?: string;
+  headers: Record<string, string>;
 }
 
 export type OpenCodeV2SessionRetryDecision = { retry: false } | { retry: true; delay: number };
@@ -253,7 +298,7 @@ export interface OpenCodeV2StructuredError {
   readonly retryAfterMs?: number;
 }
 
-export interface OpenCodeV2SessionRetry {
+export interface OpenCodeV2SessionRetryEvent {
   readonly sessionID: string;
   readonly agent: string;
   readonly model: OpenCodeV2ModelRef;
@@ -263,17 +308,65 @@ export interface OpenCodeV2SessionRetry {
 }
 
 export interface OpenCodeV2SessionHooks {
-  readonly "http.request": OpenCodeV2SessionHttpRequest;
-  readonly "http.response": OpenCodeV2SessionHttpResponse;
-  readonly retry: OpenCodeV2SessionRetry;
+  readonly context: OpenCodeV2SessionContextEvent;
+  readonly generate: OpenCodeV2SessionContextEvent;
+  readonly compaction: OpenCodeV2SessionContextEvent;
+  readonly "model.request": OpenCodeV2SessionModelRequestEvent;
+  readonly retry: OpenCodeV2SessionRetryEvent;
+}
+
+export interface OpenCodeV2SessionInfo {
+  readonly id?: string;
+  readonly fork?: { readonly sessionID: string };
+  readonly [key: string]: unknown;
 }
 
 export interface OpenCodeV2SessionDomain {
+  readonly get?: (input: { sessionID: string }) => Promise<OpenCodeV2SessionInfo | { data?: OpenCodeV2SessionInfo } | undefined>;
   readonly hook: <K extends keyof OpenCodeV2SessionHooks>(
     name: K,
     handler: (event: OpenCodeV2SessionHooks[K]) => Promise<void> | void,
     options?: { readonly providerID?: string; readonly modelID?: string },
   ) => Promise<OpenCodeV2Registration> | OpenCodeV2Registration | void;
+}
+
+export interface OpenCodeV2AgentDomain {
+  readonly get?: (input: { agentID: string }) => Promise<{ data?: { system?: string } } | undefined>;
+}
+
+export interface OpenCodeV2PermissionAssertInput {
+  readonly sessionID: string;
+  readonly agent?: string;
+  readonly action: string;
+  readonly resources: ReadonlyArray<string>;
+  readonly save?: ReadonlyArray<string>;
+  readonly metadata?: Record<string, unknown>;
+  readonly source?: {
+    readonly type: "tool";
+    readonly messageID: string;
+    readonly id: string;
+  };
+}
+
+export interface OpenCodeV2PermissionDomain {
+  readonly assert?: (input: OpenCodeV2PermissionAssertInput) => Promise<void>;
+}
+
+export interface OpenCodeV2StorageDomain {
+  readonly get: (key: string) => Promise<unknown>;
+  readonly set: (key: string, value: unknown) => Promise<void>;
+  readonly remove: (key: string) => Promise<void>;
+  readonly scan?: (options: {
+    readonly prefix: string;
+    readonly after?: string;
+    readonly limit?: number;
+  }) => Promise<{ readonly entries: ReadonlyArray<{ key: string; value: unknown }>; readonly next?: string }>;
+}
+
+export interface OpenCodeV2EventDomain {
+  readonly subscribe: (options?: {
+    readonly types?: ReadonlyArray<string>;
+  }) => AsyncIterable<{ readonly type: string; readonly data?: Record<string, unknown> }>;
 }
 
 export interface OpenCodeV2PluginLocation {
@@ -313,7 +406,8 @@ export interface OpenCodeV2WebSearchEditor {
   };
 }
 
-export interface OpenCodeV2WebSearchDomain extends OpenCodeV2TransformRegistry<OpenCodeV2WebSearchEditor> {
+export interface OpenCodeV2WebSearchDomain
+  extends OpenCodeV2TransformRegistry<OpenCodeV2WebSearchEditor> {
   readonly providers?: () => Promise<unknown>;
   readonly query?: (input: { query: string; providerID?: string }) => Promise<unknown>;
 }
@@ -325,27 +419,59 @@ export interface OpenCodeV2WebSearchOptions {
 }
 
 export interface OpenCodeV2PluginOptions {
+  /** Optional custom path to the `agy` binary (defaults to `OPENCODE_AGY_PATH` or `agy` in PATH). */
+  readonly binaryPath?: string;
+  /** Optional isolated Gemini directory (`--gemini-dir`). When omitted, uses default `~/.gemini`. */
+  readonly geminiDir?: string;
+  /** Relative `--app-data-dir` name under `geminiDir` (must never be an absolute path). */
+  readonly appDataDir?: string;
+  /** Tool execution mode: `"opencode"` (default, bridges all OpenCode tools via MCP) or `"hybrid"`. */
+  readonly toolMode?: AgyToolMode;
+  /** Enable Application Default Credentials (`AGY_ADC_AUTH=true`) for Gemini Enterprise Agent Platform. */
+  readonly adcAuth?: boolean;
+  /** Optional explicit Google Cloud project ID (`GOOGLE_CLOUD_PROJECT` / `AGY_ACP_CCPA_PROJECT`). */
   readonly projectId?: string;
+  /** Controls `AGY_CLI_AUTO_COMPACT_OVERRIDE` (defaults to `"off"` so OpenCode manages compaction). */
+  readonly autoCompactOverride?: string;
+  /** Whether to load `agy` default skills/customizations (`--include-default-customizations`). */
+  readonly includeDefaultCustomizations?: boolean;
+  /** Stream inactivity timeout in ms before SQLite `step_type = 17` stall check triggers. */
+  readonly watchdogTimeoutMs?: number;
+  /** Skip background startup probe (primarily for deterministic unit tests). */
+  readonly skipInitialProbe?: boolean;
   /** Enabled by default. Set to `false` (or `{ enabled: false }`) to opt out of Antigravity web search. */
   readonly webSearch?: boolean | OpenCodeV2WebSearchOptions;
   readonly [key: string]: unknown;
 }
 
 export interface OpenCodeV2PluginContext {
-  readonly provider: OpenCodeV2TransformRegistry<OpenCodeV2ProviderEditor>;
+  readonly provider?: OpenCodeV2ProviderDomain;
   readonly model?: OpenCodeV2TransformRegistry<OpenCodeV2ModelEditor>;
   readonly integration: OpenCodeV2IntegrationDomain;
   readonly session: OpenCodeV2SessionDomain;
+  readonly aisdk?: OpenCodeV2AISDKDomain;
+  readonly agent?: OpenCodeV2AgentDomain;
+  readonly permission?: OpenCodeV2PermissionDomain;
+  readonly storage?: OpenCodeV2StorageDomain;
+  readonly event?: OpenCodeV2EventDomain;
   readonly websearch?: OpenCodeV2WebSearchDomain;
   readonly options?: OpenCodeV2PluginOptions;
   readonly location?: OpenCodeV2PluginLocation;
+  readonly [key: string]: unknown;
 }
 
 export type OpenCodeV2Cleanup = () => Promise<void> | void;
 
 export interface OpenCodeV2PluginDefinition {
   readonly id: string;
-  readonly setup: (ctx: OpenCodeV2PluginContext) => Promise<OpenCodeV2Cleanup | void> | OpenCodeV2Cleanup | void;
+  readonly setup: (
+    ctx: OpenCodeV2PluginContext,
+  ) => Promise<OpenCodeV2Cleanup | void> | OpenCodeV2Cleanup | void;
+}
+
+export interface DualOpenCodePlugin extends OpenCodeV2PluginDefinition {
+  readonly server?: (input: unknown) => Promise<unknown>;
+  readonly [key: string]: unknown;
 }
 
 export function defineOpenCodeV2Plugin(

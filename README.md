@@ -1,8 +1,12 @@
 # opencode-agy-auth
 
-Minimal, zero-bloat **OpenCode v2** provider & grounded web search plugin for **Antigravity CLI (`google-agy`)** OAuth.
+Minimal, zero-bloat **OpenCode v2** provider & grounded web search plugin for **Antigravity CLI (`google-agy`)**, powered by the official **`agy acp`** (Agent Client Protocol v1) transport.
 
-Registers the `google-agy` LLM provider, OAuth integration, Code Assist protocol hooks, and OpenCode v2's native `websearch` provider — zero slash commands, zero telemetry, zero toast spam, zero external runtime dependencies.
+Registers the `google-agy` AI SDK v3 provider (`aisdk:@opencode-agy/acp`), `agy acp --login` integration, OpenCode MCP tool bridge, live model + `thought_level` catalog discovery, and OpenCode v2's native `websearch` provider — zero slash commands, zero telemetry, zero external runtime dependencies.
+
+## Prerequisites
+
+Install **Antigravity CLI (`agy` `1.5.8+`)** and ensure `agy` is on your `PATH` (or set `OPENCODE_AGY_PATH=/path/to/agy`).
 
 ## Installation (OpenCode v2)
 
@@ -26,33 +30,22 @@ Or load from a local directory:
 
 ## Authentication
 
-Connect the **Antigravity CLI** integration in OpenCode v2 (`opencode auth login` -> `Antigravity CLI`), complete Google sign-in in your browser, and paste the callback redirect URL (`https://antigravity.google/oauth-callback?code=...`) into OpenCode.
+- **Zero Re-Auth (Existing `agy` Login)**: If you are already signed in to `agy` (`~/.gemini/antigravity-cli`), `google-agy` activates automatically on startup with zero duplicate login prompts.
+- **Interactive / Headless Login**: Run `agy acp --login` directly (supports browser callback and headless/SSH URL paste) or run `opencode auth login` -> `Antigravity CLI` -> `Sign in with Antigravity CLI (agy acp --login)`.
+- **Isolated Profiles & Enterprise ADC**: Optionally configure `geminiDir` (passes `--gemini-dir <dir> --app-data-dir antigravity-acp`) or `adcAuth: true` (`AGY_ADC_AUTH=true`).
 
-## Models & Variants
+## Dynamic Models & Reasoning Variants
 
-| Model ID | Name | Variants |
-| --- | --- | --- |
-| `google-agy/gemini-4-carbon` | Gemini 4 Carbon | `low`, `medium`, `high` |
-| `google-agy/gemini-4-argon` | Gemini 4 Argon | `low`, `medium`, `high` |
-| `google-agy/gemini-4-hydrogen` | Gemini 4 Hydrogen | `low`, `medium`, `high`, `xhigh` |
-| `google-agy/gemini-pro-orchestrator` | Orchestrator (Carbon) | — |
-| `google-agy/gemini-pro-orchestrator-argon` | Orchestrator (Argon) | — |
-| `google-agy/gemini-3.8-flash` | Gemini 3.8 Flash | `low`, `medium`, `high` |
-| `google-agy/gemini-3.5-flash-lite` | Gemini 3.5 Flash Lite | — |
-| `google-agy/gemini-3.1-flash-lite` | Gemini 3.1 Flash Lite | — |
-| `google-agy/gemini-3-flash` | Gemini 3 Flash | — |
-| `google-agy/gemini-2.5-pro` | Gemini 2.5 Pro | — |
-| `google-agy/gemini-2.5-flash` | Gemini 2.5 Flash | — |
-| `google-agy/gemini-2.5-flash-lite` | Gemini 2.5 Flash Lite | — |
-| `google-agy/claude-opus-5-5` | Claude Opus 5.5 | `low`, `medium`, `high` |
-| `google-agy/claude-sonnet-5-5` | Claude Sonnet 5.5 | `low`, `medium`, `high` |
-| `google-agy/gpt-oss-120b-medium` | GPT-OSS 120B (Medium) | — |
+At startup, `opencode-agy-auth` queries `agy acp` (`initialize` + `session/new` + `session/set_config_option`) to discover every model and per-model `thought_level` (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) available to your account, caching the catalog in OpenCode storage and `~/.cache/opencode/agy-acp-catalog.json` while providing an instant cold-start fallback catalog (`gemini-4-carbon`, `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-pro-orchestrator`, `gemini-pro-orchestrator-argon`, `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-3-flash`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `claude-opus-5-5`, `claude-sonnet-5-5`, `gpt-oss-120b-medium`).
 
-In addition to the built-in catalog, the plugin automatically queries `:fetchAvailableModels` in the background when authenticated so newly released `agy` models and tier variants appear automatically.
+## Tool Execution Modes
+
+- **`"opencode"` (Default)**: Disables `agy`'s internal file/shell tools (`_meta.disableBuiltInTools: true`) and bridges OpenCode's native tools (`bash`, `read`, `edit`, `glob`, `grep`, `task`, MCP tools, etc.) into `agy` via an ephemeral localhost MCP bridge with Pause-and-Yield execution — preserving 100% of OpenCode's permission prompts, diffs, snapshots, `/undo`, and custom tools.
+- **`"hybrid"` (Optional)**: Enables `agy`'s built-in Cortex tools alongside OpenCode MCP tools, routing `agy` `session/request_permission` checks through OpenCode's `ctx.permission.assert`.
 
 ## Web Search (Enabled by Default, Opt-Out)
 
-By default, `opencode-agy-auth` registers **`Antigravity CLI` (`google-agy`)** as OpenCode v2's native `websearch` provider using Code Assist's Google Search grounding (`requestType: "web_search"` on `gemini-3.5-flash-lite`) with inline `[1]`, `[2]` citations and source URLs.
+By default, `opencode-agy-auth` registers **`Antigravity CLI` (`google-agy`)** as OpenCode v2's native `websearch` provider using stateless `agy acp` sessions restricted strictly to `search_web` (`gemini-3.8-flash` / `gemini-3-flash` with `low` thinking effort and automatic `429` fallback to alternate models).
 
 To opt out of Antigravity web search (or set `OPENCODE_AGY_WEBSEARCH=false`):
 
@@ -70,21 +63,24 @@ To opt out of Antigravity web search (or set `OPENCODE_AGY_WEBSEARCH=false`):
 }
 ```
 
-## Optional Project ID
-
-For paid or enterprise Google Cloud accounts that require an explicit Cloud project, set `OPENCODE_AGY_PROJECT_ID` (or `GOOGLE_CLOUD_PROJECT`) or configure `projectId` in `opencode.json`:
+## Plugin Options
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["github:Saimo/opencode-agy-auth"],
-  "providers": {
-    "google-agy": {
-      "settings": {
-        "projectId": "your-gcp-project-id"
+  "plugins": [
+    {
+      "package": "github:Saimo/opencode-agy-auth",
+      "options": {
+        "binaryPath": "/home/user/.local/bin/agy",
+        "toolMode": "opencode",
+        "geminiDir": "/path/to/optional/isolated-gemini-dir",
+        "adcAuth": false,
+        "projectId": "optional-gcp-project-id",
+        "webSearch": true
       }
     }
-  }
+  ]
 }
 ```
 

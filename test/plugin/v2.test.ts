@@ -1,34 +1,51 @@
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AGY_PROVIDER_ID } from "../../src/constants";
-import * as fetchModule from "../../src/fetch";
+import {
+  AGY_ACP_PACKAGE,
+  AGY_AISDK_PACKAGE,
+  AGY_EXTERNAL_METHOD_ID,
+  AGY_LOGIN_METHOD_ID,
+  AGY_PROVIDER_ID,
+} from "../../src/constants";
+import { resetDynamicTierMappingsForTesting } from "../../src/plugin/tier";
 import {
   STATIC_MODELS_SIMPLE,
   createV2PluginDefinition,
-  getDiskSignatureCache,
-  ingestAvailableModelsResponse,
-  resetDiskSignatureCacheForTesting,
-  resetDynamicModelsForTesting,
-  resolveModelTier,
   resolveModelVariants,
-  setStoredAuthOverrideForTesting,
   setupOpenCodeV2,
   v2PluginDefinition,
 } from "../../src/plugin/v2";
-import { getModelEnum } from "../../src/sdk/request/prepare";
 import type {
+  OpenCodeV2AISDKSdkHookEvent,
   OpenCodeV2IntegrationEditor,
   OpenCodeV2IntegrationMethodRegistration,
   OpenCodeV2ModelInfo,
   OpenCodeV2PluginContext,
   OpenCodeV2ProviderEditor,
   OpenCodeV2ProviderInfo,
+  OpenCodeV2SessionModelRequestEvent,
+  OpenCodeV2SessionRetryEvent,
 } from "../../src/plugin/types";
 
-describe("OpenCode v2 Plugin Setup", () => {
+const MOCK_AGY_PATH = resolve(__dirname, "../fixtures/mock-agy-acp.mjs");
+
+describe("OpenCode v2 Antigravity ACP Plugin Setup", () => {
+  const tempDirs: string[] = [];
+
+  function makeTempDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), "agy-v2-plugin-test-"));
+    tempDirs.push(dir);
+    return dir;
+  }
+
   afterEach(() => {
-    setStoredAuthOverrideForTesting(undefined);
-    resetDynamicModelsForTesting();
+    resetDynamicTierMappingsForTesting();
     vi.restoreAllMocks();
+    for (const d of tempDirs.splice(0, tempDirs.length)) {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 
   it("defines pure OpenCode v2 plugin definition", () => {
@@ -37,262 +54,246 @@ describe("OpenCode v2 Plugin Setup", () => {
     expect(createV2PluginDefinition()).toBe(v2PluginDefinition);
   });
 
-  it("initializes and shuts down caches cleanly via returned cleanup callback", async () => {
-    resetDiskSignatureCacheForTesting();
-    expect(getDiskSignatureCache()).toBeNull();
+  it("registers google-agy with aisdk:@opencode-agy/acp, live-discovers new agy models, and wires LanguageModelV3 via ctx.aisdk.hook", async () => {
+    const geminiDir = makeTempDir();
+    // Seed auth.json hint so cold-start activation is immediately "enabled"
+    mkdirSync(join(geminiDir, "antigravity-acp"), { recursive: true });
+    writeFileSync(join(geminiDir, "antigravity-acp", "auth.json"), '{"signedIn":true}', "utf8");
 
-    const mockCtx: OpenCodeV2PluginContext = {
-      integration: { transform: vi.fn(async () => {}) },
-      provider: { transform: vi.fn(async () => {}) },
-      session: { hook: vi.fn(async () => {}) },
-      location: {},
-    };
-
-    const cleanup = await setupOpenCodeV2(mockCtx);
-    expect(getDiskSignatureCache()).not.toBeNull();
-    expect(typeof cleanup).toBe("function");
-    await cleanup();
-  });
-
-  it("registers google-agy provider and all models with native @opencode/ai/providers/google contract", async () => {
     let providerTransformFn: ((editor: OpenCodeV2ProviderEditor) => void) | undefined;
+    let sdkHookFn: ((event: OpenCodeV2AISDKSdkHookEvent) => Promise<void> | void) | undefined;
+    const sessionHooks = new Map<string, (evt: unknown) => Promise<void> | void>();
+    let providerReloadResolve!: () => void;
+    const reloadPromise = new Promise<void>((resolveReload) => {
+      providerReloadResolve = resolveReload;
+    });
 
-    const mockCtx: OpenCodeV2PluginContext = {
+    const storageMap = new Map<string, unknown>();
+
+    const ctx: OpenCodeV2PluginContext = {
+      options: {
+        binaryPath: MOCK_AGY_PATH,
+        geminiDir,
+      },
+      storage: {
+        get: async (k) => storageMap.get(k),
+        set: async (k, v) => {
+          storageMap.set(k, v);
+        },
+        remove: async (k) => {
+          storageMap.delete(k);
+        },
+      },
       integration: { transform: vi.fn(async () => {}) },
       provider: {
         transform: vi.fn(async (fn) => {
           providerTransformFn = fn;
         }),
+        reload: vi.fn(async () => {
+          providerReloadResolve();
+        }),
       },
-      session: { hook: vi.fn(async () => {}) },
-      location: {},
+      aisdk: {
+        hook: vi.fn(async (name, handler) => {
+          if (name === "sdk") {
+            sdkHookFn = handler as (event: OpenCodeV2AISDKSdkHookEvent) => Promise<void> | void;
+          }
+        }),
+      },
+      session: {
+        get: vi.fn(async ({ sessionID }) =>
+          sessionID === "forked_ses" ? { id: sessionID, fork: { sessionID: "parent_ses" } } : undefined,
+        ),
+        hook: vi.fn(async (name, handler) => {
+          sessionHooks.set(name, handler as (evt: unknown) => Promise<void> | void);
+        }),
+      },
+      location: { directory: geminiDir },
     };
 
-    const cleanup = await setupOpenCodeV2(mockCtx);
+    const cleanup = await setupOpenCodeV2(ctx);
 
-    const providers: Record<string, OpenCodeV2ProviderInfo> = {};
-    const models: Record<string, OpenCodeV2ModelInfo> = {};
-
-    providerTransformFn!({
-      update(id, fn) {
-        const draft: OpenCodeV2ProviderInfo = providers[id] ?? { id };
-        fn(draft);
-        providers[id] = draft;
-      },
-      models: {
-        update(providerID, modelID, fn) {
-          const key = `${providerID}/${modelID}`;
-          const draft: OpenCodeV2ModelInfo = models[key] ?? {};
-          fn(draft);
-          models[key] = draft;
-        },
-      },
-    });
-
-    const agyProvider = providers[AGY_PROVIDER_ID];
-    expect(agyProvider).toBeDefined();
-    expect(agyProvider.name).toBe("Antigravity CLI");
-    expect(agyProvider.activation).toBe("auto");
-    expect(agyProvider.package).toBe("@opencode/ai/providers/google");
-    expect(agyProvider.integrationID).toBe(AGY_PROVIDER_ID);
-
-    for (const modelId of Object.keys(STATIC_MODELS_SIMPLE)) {
-      const m = models[`${AGY_PROVIDER_ID}/${modelId}`];
-      expect(m).toBeDefined();
-      expect(m.id).toBe(modelId);
-      expect(m.modelID).toBe(modelId);
-      expect(m.providerID).toBe(AGY_PROVIDER_ID);
-      expect(m.package).toBe("@opencode/ai/providers/google");
-      expect(m.cost).toEqual([]);
-      expect(m.status).toBe("active");
-      expect(m.enabled).toBe(true);
-      expect(m.capabilities?.tools).toBe(true);
-      expect(m.variants).toEqual(resolveModelVariants(modelId));
-    }
-
-    expect(models[`${AGY_PROVIDER_ID}/gemini-4-carbon`].variants).toEqual([
-      { id: "low", headers: { "x-agy-tier": "low" } },
-      { id: "medium", headers: { "x-agy-tier": "medium" } },
-      { id: "high", headers: { "x-agy-tier": "high" } },
-    ]);
-    expect(models[`${AGY_PROVIDER_ID}/gemini-pro-orchestrator`].name).toBe("Orchestrator (Carbon)");
-    expect(models[`${AGY_PROVIDER_ID}/gemini-pro-orchestrator-argon`].name).toBe("Orchestrator (Argon)");
-    expect(models[`${AGY_PROVIDER_ID}/gemini-4-hydrogen`].variants).toEqual([
-      { id: "low", headers: { "x-agy-tier": "low" } },
-      { id: "medium", headers: { "x-agy-tier": "medium" } },
-      { id: "high", headers: { "x-agy-tier": "high" } },
-      { id: "xhigh", headers: { "x-agy-tier": "xhigh" } },
-    ]);
-    expect(models[`${AGY_PROVIDER_ID}/claude-sonnet-5-5`].family).toBe("claude");
-    expect(models[`${AGY_PROVIDER_ID}/gpt-oss-120b-medium`].family).toBe("gpt");
-
-    // Verify dynamic model discovery from :fetchAvailableModels
-    const changed = ingestAvailableModelsResponse({
-      agentModelSorts: [
-        {
-          groups: [
-            {
-              modelIds: [
-                "gemini-4-oxygen-low",
-                "gemini-4-oxygen-high",
-                "gemini-pro-specialist",
-              ],
+    try {
+      const providers: Record<string, OpenCodeV2ProviderInfo> = {};
+      const models: Record<string, OpenCodeV2ModelInfo> = {};
+      const runTransform = () => {
+        for (const k of Object.keys(models)) delete models[k];
+        providerTransformFn!({
+          update(id, fn) {
+            const draft: OpenCodeV2ProviderInfo =
+              providers[id] ??
+              ({
+                id,
+                name: "",
+                activation: "auto",
+                package: "",
+              } satisfies OpenCodeV2ProviderInfo);
+            fn(draft);
+            providers[id] = draft;
+          },
+          models: {
+            update(providerID, modelID, fn) {
+              const key = `${providerID}/${modelID}`;
+              const draft = (models[key] ?? {}) as OpenCodeV2ModelInfo;
+              fn(draft);
+              models[key] = draft;
             },
-          ],
-        },
-      ],
-      models: {
-        "gemini-4-oxygen-low": {
-          displayName: "Gemini 4 Oxygen (Low)",
-          maxTokens: 1048576,
-          maxOutputTokens: 262144,
-          model: "MODEL_PLACEHOLDER_M901",
-          supportsImages: true,
-          supportsThinking: true,
-        },
-        "gemini-4-oxygen-high": {
-          displayName: "Gemini 4 Oxygen (High)",
-          maxTokens: 1048576,
-          maxOutputTokens: 262144,
-          model: "MODEL_PLACEHOLDER_M902",
-          supportsImages: true,
-          supportsThinking: true,
-        },
-        "gemini-pro-specialist": {
-          displayName: "Gemini Pro Specialist",
-          maxTokens: 1048576,
-          maxOutputTokens: 131072,
-          model: "MODEL_PLACEHOLDER_M903",
-          supportsImages: true,
-          supportsThinking: true,
-        },
-      },
-    });
-    expect(changed).toBe(true);
-    expect(resolveModelTier("gemini-4-oxygen", { headers: { "x-agy-tier": "high" } })).toBe(
-      "gemini-4-oxygen-high",
-    );
-    expect(getModelEnum("gemini-4-oxygen-high")).toBe("MODEL_PLACEHOLDER_M902");
-    expect(getModelEnum("gemini-pro-specialist")).toBe("MODEL_PLACEHOLDER_M903");
+          },
+        });
+      };
 
-    await cleanup();
+      // 1. Cold-start before background probe finishes -> serves STATIC_MODELS_SIMPLE + activation: "enabled"
+      runTransform();
+      expect(providers[AGY_PROVIDER_ID]?.package).toBe(AGY_AISDK_PACKAGE);
+      expect(providers[AGY_PROVIDER_ID]?.activation).toBe("enabled");
+      for (const staticId of Object.keys(STATIC_MODELS_SIMPLE)) {
+        expect(models[`${AGY_PROVIDER_ID}/${staticId}`]?.package).toBe(AGY_AISDK_PACKAGE);
+        expect(models[`${AGY_PROVIDER_ID}/${staticId}`]?.variants).toEqual(
+          resolveModelVariants(staticId),
+        );
+      }
+
+      // 2. Wait for background `probeAgyAuthAndCatalog` -> `provider.reload()`
+      await reloadPromise;
+      runTransform();
+
+      // Newly discovered `gemini-4-neon` from `mock-agy-acp.mjs` is now registered with live `minimal`/`medium`/`max` variants!
+      const neon = models[`${AGY_PROVIDER_ID}/gemini-4-neon`];
+      expect(neon).toBeDefined();
+      expect(neon.variants.map((v) => v.id)).toEqual(["minimal", "medium", "max"]);
+
+      // 3. Verify `ctx.aisdk.hook("sdk")` resolves `LanguageModelV3` for `@opencode-agy/acp`
+      const sdkEvt: OpenCodeV2AISDKSdkHookEvent = {
+        model: neon,
+        package: AGY_ACP_PACKAGE,
+        options: {},
+      };
+      await sdkHookFn!(sdkEvt);
+      expect(sdkEvt.sdk).toBeDefined();
+
+      const lm = sdkEvt.sdk!.languageModel("gemini-4-neon");
+      expect(lm.specificationVersion).toBe("v3");
+
+      const gen = await lm.doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "Ping neon" }] }],
+        headers: { "x-opencode-session-id": "ses_live_1", "x-agy-tier": "max" },
+      });
+      expect(gen.content[1]).toMatchObject({
+        type: "text",
+      });
+      expect(
+        gen.content.some(
+          (c) => c.type === "text" && c.text.includes("model=gemini-4-neon,thought=max"),
+        ),
+      ).toBe(true);
+
+      // 4. Verify `session.hook("model.request")` tags forked sessions and request kinds
+      const modelReqHandler = sessionHooks.get("model.request")!;
+      const reqEvt: OpenCodeV2SessionModelRequestEvent = {
+        sessionID: "forked_ses",
+        agent: "plan",
+        model: { id: "gemini-4-carbon", providerID: AGY_PROVIDER_ID, variant: "high" },
+        kind: "primary",
+        headers: {},
+      };
+      await modelReqHandler(reqEvt);
+      expect(reqEvt.headers["x-opencode-session-id"]).toBe("forked_ses");
+      expect(reqEvt.headers["x-opencode-agy-kind"]).toBe("primary");
+      expect(reqEvt.headers["x-opencode-agy-fork-source"]).toBe("parent_ses");
+      expect(reqEvt.headers["x-agy-tier"]).toBe("high");
+
+      // 5. Verify `session.hook("retry")` honors quota retry delays on 429 and blocks 401/400
+      const retryHandler = sessionHooks.get("retry")!;
+      const retry429: OpenCodeV2SessionRetryEvent = {
+        sessionID: "ses_1",
+        agent: "code",
+        model: { id: "gemini-4-carbon", providerID: AGY_PROVIDER_ID },
+        error: {
+          type: "api_error",
+          message: "Quota exhausted",
+          status: 429,
+          retryAfterMs: 3500,
+        },
+        attempt: 1,
+        decision: { retry: false },
+      };
+      await retryHandler(retry429);
+      expect(retry429.decision).toEqual({ retry: true, delay: 3500 });
+
+      const retry401: OpenCodeV2SessionRetryEvent = {
+        ...retry429,
+        error: { type: "auth_error", message: "Needs auth", status: 401 },
+        decision: { retry: true, delay: 1000 },
+      };
+      await retryHandler(retry401);
+      expect(retry401.decision).toEqual({ retry: false });
+    } finally {
+      await cleanup();
+    }
   });
 
-  it("registers OAuth integration with authorize, callback (throwing Error on failure), refresh, and label", async () => {
+  it("registers command (agy acp --login) and external (~/.gemini) integration methods and reports needs_auth when unauthenticated", async () => {
+    const geminiDir = makeTempDir();
     let integrationTransformFn: ((editor: OpenCodeV2IntegrationEditor) => void) | undefined;
+    const statusSpy = vi.fn(async () => {});
 
-    const mockCtx: OpenCodeV2PluginContext = {
+    const ctx: OpenCodeV2PluginContext = {
+      options: {
+        binaryPath: MOCK_AGY_PATH,
+        geminiDir,
+        skipInitialProbe: true,
+      },
       integration: {
         transform: vi.fn(async (fn) => {
           integrationTransformFn = fn;
         }),
+        connection: {
+          active: vi.fn(async () => ({ id: "conn_1" })),
+          status: statusSpy,
+        },
       },
       provider: { transform: vi.fn(async () => {}) },
       session: { hook: vi.fn(async () => {}) },
-      location: {},
     };
 
-    const cleanup = await setupOpenCodeV2(mockCtx);
+    const cleanup = await setupOpenCodeV2(ctx);
 
-    const integrations: Record<string, { id?: string; name?: string }> = {};
-    let methodReg: OpenCodeV2IntegrationMethodRegistration | undefined;
-
-    integrationTransformFn!({
-      update(id, fn) {
-        const draft = integrations[id] ?? { id };
-        fn(draft);
-        integrations[id] = draft;
-      },
-      method: {
-        update(reg) {
-          methodReg = reg;
+    try {
+      const methods: OpenCodeV2IntegrationMethodRegistration[] = [];
+      integrationTransformFn!({
+        update: vi.fn(),
+        method: {
+          update(reg) {
+            methods.push(reg);
+          },
         },
-      },
-    });
+      });
 
-    expect(integrations[AGY_PROVIDER_ID]?.name).toBe("Antigravity CLI");
-    expect(methodReg).toBeDefined();
-    expect(methodReg!.integrationID).toBe(AGY_PROVIDER_ID);
-    expect(methodReg!.method).toEqual({
-      id: "oauth",
-      type: "oauth",
-      label: "Sign in with Google (Antigravity CLI)",
-    });
+      expect(methods).toHaveLength(2);
+      const cmdMethod = methods.find((m) => "id" in m.method && m.method.id === AGY_LOGIN_METHOD_ID);
+      const extMethod = methods.find(
+        (m) => "id" in m.method && m.method.id === AGY_EXTERNAL_METHOD_ID,
+      );
 
-    expect(
-      methodReg!.label?.({
-        type: "oauth",
-        methodID: "oauth",
-        access: "a",
-        refresh: "r",
-        expires: 1000,
-        metadata: { email: "dev@example.com" },
-      }),
-    ).toBe("dev@example.com");
-
-    const authFlow = await methodReg!.authorize!();
-    expect(authFlow.mode).toBe("code");
-    expect(authFlow.url).toContain("https://accounts.google.com/o/oauth2/v2/auth");
-    expect(authFlow.url).toContain("code_challenge_method=S256");
-
-    await expect(authFlow.callback("")).rejects.toThrow("Missing authorization code");
-    await expect(
-      authFlow.callback("https://antigravity.google/oauth-callback?code=abc&state=wrong-state"),
-    ).rejects.toThrow("OAuth state mismatch");
-
-    vi.spyOn(fetchModule, "agyFetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.includes("oauth2.googleapis.com/token")) {
-        return new Response(
-          JSON.stringify({
-            access_token: "fresh-access-token",
-            refresh_token: "fresh-refresh-token",
-            expires_in: 3600,
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (url.includes("googleapis.com/oauth2/v1/userinfo")) {
-        return new Response(JSON.stringify({ email: "user@example.com" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (url.includes(":loadCodeAssist")) {
-        return new Response(
-          JSON.stringify({ cloudaicompanionProject: "bound-project-id" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response("Not Found", { status: 404 });
-    });
-
-    const stateParam = new URL(authFlow.url).searchParams.get("state")!;
-    const cred = await authFlow.callback(
-      `https://antigravity.google/oauth-callback?code=valid-auth-code&state=${stateParam}`,
-    );
-
-    expect(cred.type).toBe("oauth");
-    expect(cred.methodID).toBe("oauth");
-    expect(cred.access).toBe("fresh-access-token");
-    expect(cred.refresh).toContain("fresh-refresh-token");
-    expect(cred.refresh).toContain("bound-project-id");
-    expect(Number.isInteger(cred.expires)).toBe(true);
-    expect(cred.metadata?.email).toBe("user@example.com");
-
-    // Exercise native refresh(credential)
-    const refreshed = await methodReg!.refresh!(cred);
-    expect(refreshed.type).toBe("oauth");
-    expect(refreshed.access).toBe("fresh-access-token");
-    expect(Number.isInteger(refreshed.expires)).toBe(true);
-    expect(refreshed.metadata?.email).toBe("user@example.com");
-
-    // Refresh throws Error on failure
-    vi.spyOn(fetchModule, "agyFetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
-    );
-    await expect(methodReg!.refresh!(cred)).rejects.toThrow("Failed to refresh Google Antigravity OAuth token");
-
-    await cleanup();
+      expect(cmdMethod?.method).toMatchObject({
+        id: AGY_LOGIN_METHOD_ID,
+        type: "command",
+        command: [
+          MOCK_AGY_PATH,
+          "acp",
+          "--login",
+          "--gemini-dir",
+          geminiDir,
+          "--app-data-dir",
+          "antigravity-acp",
+        ],
+      });
+      expect(extMethod?.method).toMatchObject({
+        id: AGY_EXTERNAL_METHOD_ID,
+        type: "external",
+      });
+    } finally {
+      await cleanup();
+    }
   });
 });

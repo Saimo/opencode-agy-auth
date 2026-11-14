@@ -1,7 +1,7 @@
 {
   "name": "opencode-agy-auth",
   "version": "2.0.0",
-  "description": "Minimal Google Antigravity CLI (google-agy) OAuth provider plugin for OpenCode v2",
+  "description": "Official Antigravity CLI (agy acp) provider & grounded web search plugin for OpenCode v2",
   "author": "Saimo",
   "repository": {
     "type": "git",
@@ -31,11 +31,11 @@
     "opencode",
     "opencode-plugin",
     "opencode-v2",
-    "gemini",
+    "acp",
+    "agent-client-protocol",
     "antigravity",
     "agy",
-    "google-gemini",
-    "oauth"
+    "gemini"
   ],
   "license": "MIT",
   "type": "module",
@@ -45,7 +45,6 @@
     "test:watch": "vitest",
     "build": "tsup && tsc -p tsconfig.build.json",
     "typecheck": "tsc",
-    "models:refresh": "node scripts/fetch-models.mjs",
     "smoke:node-import": "node -e \"import('./dist/index.js').then((m) => { if (!m.default?.id || typeof m.default?.setup !== 'function') throw new Error('Invalid OpenCode v2 plugin export'); console.log('ok'); }).catch((error) => { console.error(error); process.exit(1); })\"",
     "prepack": "npm run build"
   },
